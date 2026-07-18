@@ -422,10 +422,12 @@ async function vDesk(){
     h+=`<div class='deskhead'>Latest gate — ${esc(g.model)} · ${esc(g.analysis_type.replace(/_/g," "))} · rev ${g.target_rev}
       <span class="chip ${esc(g.verdict)}" style="margin-left:.6rem">${esc(g.verdict)}</span>
       ${g.stale?'<span class="chip stale">stale — chapter has moved</span>':""}</div>`;
-    for(const k of Object.keys(g.scores))
+    const gk=Object.keys(g.scores), gmx=Math.max(1,...gk.map(k=>g.scores[k]));
+    const gs=gmx<=10?10:1;
+    for(const k of gk)
       h+=`<div class="bar"><span class="bl">${esc(k.replace(/_/g," "))}</span>
-        <span class="bt"><span class="bf" style="width:${Math.min(100,g.scores[k])}%"></span></span>
-        <span class="bn">${g.scores[k]}</span></div>`;
+        <span class="bt"><span class="bf" style="width:${Math.min(100,g.scores[k]*gs)}%"></span></span>
+        <span class="bn">${g.scores[k]}${gs===10?"/10":""}</span></div>`;
     h+=`<div class="editbar"><button class="btn2" onclick="VIEW={name:'run',id:'${g.run_id}'};render()">Full report</button></div>`;
   }
   h+="<div class='deskhead'>Awaiting your ruling</div>";
@@ -494,9 +496,11 @@ async function vRun(id){
   if(r.observed_summary) h+=`<div class="blockhead">Observed</div><div class="lede">${esc(r.observed_summary)}</div>`;
   const sk=Object.keys(r.scores||{});
   if(sk.length){h+="<div class='blockhead'>Scores</div>";
+    const mx=Math.max(...sk.map(k=>r.scores[k]));
+    const scale=mx<=10?10:1;  // one historical run scored in tens; bars normalize, numbers stay honest
     for(const k of sk) h+=`<div class="bar"><span class="bl">${esc(k.replace(/_/g," "))}</span>
-      <span class="bt"><span class="bf" style="width:${Math.min(100,r.scores[k])}%"></span></span>
-      <span class="bn">${r.scores[k]}</span></div>`;}
+      <span class="bt"><span class="bf" style="width:${Math.min(100,r.scores[k]*scale)}%"></span></span>
+      <span class="bn">${r.scores[k]}${scale===10?"/10":""}</span></div>`;}
   if(r.strengths.length){h+="<div class='blockhead'>Strengths to protect</div>";
     for(const s of r.strengths) h+=`<div class="evq">"${esc(s.evidence_quote)}"<div style="font-style:normal;color:var(--dim);font-size:.85rem;margin-top:.3rem">${esc(s.explanation)}</div></div>`;}
   if(r.findings.length){h+="<div class='blockhead'>Findings</div>";
