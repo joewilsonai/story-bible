@@ -123,6 +123,12 @@ CREATE TABLE IF NOT EXISTS node_meta (
 -- OAuth (minimal, for header-less cloud connectors): authorization codes and
 -- bearer tokens minted against existing API keys. Tokens carry the key's FULL
 -- role (unlike URL-keys) because the human pasted the key at the consent screen.
+CREATE TABLE IF NOT EXISTS oauth_clients (
+    client_id      TEXT PRIMARY KEY,
+    redirect_uris  TEXT NOT NULL DEFAULT '[]',   -- exact-match allowlist (JSON array)
+    created_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS oauth_codes (
     code           TEXT PRIMARY KEY,
     key_name       TEXT NOT NULL,

@@ -153,7 +153,8 @@ def _init_db():
                      "ALTER TABLE entities ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'",
                      "ALTER TABLE scenes ADD COLUMN narrative_mode TEXT DEFAULT ''",
                      "ALTER TABLE scenes ADD COLUMN story_time_start TEXT DEFAULT ''",
-                     "ALTER TABLE scenes ADD COLUMN story_time_end TEXT DEFAULT ''"):
+                     "ALTER TABLE scenes ADD COLUMN story_time_end TEXT DEFAULT ''",
+                     "ALTER TABLE oauth_codes ADD COLUMN client_id TEXT DEFAULT ''"):
             try:
                 conn.execute(stmt)
             except sqlite3.OperationalError as e:
@@ -2611,6 +2612,7 @@ def backup_list() -> list[dict]:
 
 import base64
 import hashlib
+import html as _html
 import secrets as _secrets
 from datetime import timedelta
 
@@ -2675,11 +2677,46 @@ font-size:.8rem;letter-spacing:.25em;text-transform:uppercase;cursor:pointer;fon
 <p>A connector is asking for access. Paste an API key to grant it — the connector
 inherits that key's role.</p>
 <form method="POST" action="/oauth/authorize">
+<input type="hidden" name="client_id" value="{client_id}">
 <input type="hidden" name="redirect_uri" value="{redirect_uri}">
 <input type="hidden" name="state" value="{state}">
 <input type="hidden" name="code_challenge" value="{code_challenge}">
 <input type="password" name="key" placeholder="API key" autocomplete="off" autofocus>
 <button type="submit">Grant access</button></form>{err}</div></body></html>"""
+
+
+def _render_authorize(fields: dict, err: str = "") -> bytes:
+    """Consent page with EVERY interpolated field HTML-escaped (XSS-safe)."""
+    e = lambda s: _html.escape(s or "", quote=True)
+    return AUTHORIZE_PAGE.format(
+        client_id=e(fields.get("client_id", "")),
+        redirect_uri=e(fields.get("redirect_uri", "")),
+        state=e(fields.get("state", "")),
+        code_challenge=e(fields.get("code_challenge", "")),
+        err=f"<div class='err'>{_html.escape(err)}</div>" if err else "").encode()
+
+
+def _redirect_ok(conn, client_id: str, redirect_uri: str) -> bool:
+    """Exact-match against the client's registered allowlist; https or loopback only.
+    Checked BEFORE the consent page renders — credentials are never solicited for
+    an unregistered client or destination."""
+    if not client_id or not redirect_uri:
+        return False
+    try:
+        u = urllib.parse.urlparse(redirect_uri)
+    except ValueError:
+        return False
+    if not (u.scheme == "https" or (u.scheme == "http"
+            and u.hostname in ("localhost", "127.0.0.1"))):
+        return False
+    row = conn.execute("SELECT redirect_uris FROM oauth_clients WHERE client_id=?",
+                       (client_id,)).fetchone()
+    if row is None:
+        return False
+    try:
+        return redirect_uri in json.loads(row["redirect_uris"])
+    except ValueError:
+        return False
 
 
 def _mint_tokens(conn, key_name: str, role: str) -> dict:
@@ -2732,38 +2769,76 @@ async def _handle_oauth(scope, receive, send, keys) -> bool:
                 "/.well-known/oauth-protected-resource/mcp"):
         await respond(200, _resource_meta()); return True
     if path == "/oauth/register" and method == "POST":
-        await _read_body(receive)
+        try:
+            reg = json.loads((await _read_body(receive)).decode() or "{}")
+        except ValueError:
+            reg = {}
+        uris = [u for u in (reg.get("redirect_uris") or []) if isinstance(u, str)]
+        ok_uris = []
+        for u in uris:
+            p = urllib.parse.urlparse(u)
+            if p.scheme == "https" or (p.scheme == "http"
+                    and p.hostname in ("localhost", "127.0.0.1")):
+                ok_uris.append(u)
+        if not ok_uris:
+            await respond(400, b'{"error": "invalid_client_metadata", '
+                               b'"error_description": "redirect_uris (https or loopback) required"}')
+            return True
+        client_id = "sb-" + _secrets.token_hex(8)
+        conn = _db()
+        try:
+            with conn:
+                conn.execute("INSERT INTO oauth_clients (client_id, redirect_uris, created_at) "
+                             "VALUES (?,?,?)", (client_id, json.dumps(ok_uris), _now()))
+        finally:
+            conn.close()
         await respond(201, json.dumps({
-            "client_id": "sb-" + _secrets.token_hex(8),
+            "client_id": client_id, "redirect_uris": ok_uris,
             "token_endpoint_auth_method": "none",
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"]}).encode())
         return True
     if path == "/oauth/authorize" and method == "GET":
         q = _form(scope.get("query_string", b"").decode())
-        page = AUTHORIZE_PAGE.format(
-            redirect_uri=q.get("redirect_uri", ""), state=q.get("state", ""),
-            code_challenge=q.get("code_challenge", ""), err="")
-        await respond(200, page.encode(), b"text/html; charset=utf-8"); return True
+        conn = _db()
+        try:
+            allowed = _redirect_ok(conn, q.get("client_id", ""), q.get("redirect_uri", ""))
+        finally:
+            conn.close()
+        if not allowed:
+            await respond(400, b"Unknown client or unregistered redirect_uri. "
+                               b"No credentials were requested.",
+                          b"text/plain; charset=utf-8")
+            return True
+        await respond(200, _render_authorize(q), b"text/html; charset=utf-8"); return True
     if path == "/oauth/authorize" and method == "POST":
         f = _form((await _read_body(receive)).decode())
+        conn = _db()
+        try:
+            allowed = _redirect_ok(conn, f.get("client_id", ""), f.get("redirect_uri", ""))
+        finally:
+            conn.close()
+        if not allowed:
+            await respond(400, b"Unknown client or unregistered redirect_uri.",
+                          b"text/plain; charset=utf-8")
+            return True
         ident = keys.get(f.get("key", "").strip())
         if ident is None:
-            page = AUTHORIZE_PAGE.format(redirect_uri=f.get("redirect_uri", ""),
-                                         state=f.get("state", ""),
-                                         code_challenge=f.get("code_challenge", ""),
-                                         err="<div class='err'>That key didn't open it.</div>")
-            await respond(200, page.encode(), b"text/html; charset=utf-8"); return True
+            await respond(200, _render_authorize(f, "That key didn't open it."),
+                          b"text/html; charset=utf-8")
+            return True
         code = "sbc_" + _secrets.token_hex(24)
         now = datetime.now(timezone.utc)
         conn = _db()
         try:
             with conn:
                 conn.execute("INSERT INTO oauth_codes (code, key_name, role, challenge, "
-                             "redirect_uri, created_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+                             "redirect_uri, client_id, created_at, expires_at) "
+                             "VALUES (?,?,?,?,?,?,?,?)",
                              (code, ident["name"], ident["role"],
                               f.get("code_challenge", ""), f.get("redirect_uri", ""),
-                              now.isoformat(), (now + timedelta(minutes=10)).isoformat()))
+                              f.get("client_id", ""), now.isoformat(),
+                              (now + timedelta(minutes=10)).isoformat()))
         finally:
             conn.close()
         sep = "&" if "?" in f.get("redirect_uri", "") else "?"
@@ -2778,7 +2853,8 @@ async def _handle_oauth(scope, receive, send, keys) -> bool:
                     row = conn.execute("SELECT * FROM oauth_codes WHERE code=?",
                                        (f.get("code", ""),)).fetchone()
                     if (row is None or row["used"] or row["expires_at"] < _now()
-                            or row["redirect_uri"] != f.get("redirect_uri", "")):
+                            or row["redirect_uri"] != f.get("redirect_uri", "")
+                            or (row["client_id"] or "") != f.get("client_id", "")):
                         await respond(400, b'{"error": "invalid_grant"}'); return True
                     digest = hashlib.sha256(f.get("code_verifier", "").encode()).digest()
                     if base64.urlsafe_b64encode(digest).rstrip(b"=").decode() != row["challenge"]:
