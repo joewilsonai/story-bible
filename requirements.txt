@@ -1,2 +1,5 @@
 mcp>=1.10
 uvicorn>=0.30
+python-docx>=1.1
+EbookLib>=0.18
+markdown>=3.6

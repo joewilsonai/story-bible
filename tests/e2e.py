@@ -116,6 +116,99 @@ async def main():
             assert any(h["type"] == "chapter" for h in hits) or True  # content changed; just ensure no crash
             print("AUTHOR OK: accept, attribution, restore, staleness guard, force")
 
+    # --- wave 2: scenes, meta, FTS search, mentions, templates, timeline, stats,
+    # --- context bundle, export, project delete
+    async with (await as_key("k-luna")) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            sc = await call(s, "scene_create", chapter_id=cid, title="Border crossing",
+                            synopsis="Mara crosses the border; forged papers nearly fail.",
+                            content_md="Mara crossed at dusk, forged papers damp in her fist.",
+                            status="draft", pov_entity_id=hero["id"])
+            assert sc["rev"] == 1 and sc["status"] == "draft", sc
+            sid = sc["id"]
+            sc = await call(s, "scene_update", scene_id=sid,
+                            content_md="Mara crossed at dusk. The forged papers held. Barely.")
+            assert sc["rev"] == 2, sc
+            listed = await call(s, "scene_list", project_id=pid, status="draft")
+            assert any(x["id"] == sid for x in listed), listed
+            got_ch = await call(s, "chapter_get", chapter_id=cid)
+            assert any(x["id"] == sid for x in got_ch["scenes"]), got_ch
+            # meta + aliases + mentions
+            m = await call(s, "meta_set", target_type="scene", target_id=sid,
+                           key="tone", value="tense")
+            assert m["value"] == "tense", m
+            await call(s, "meta_set", target_type="entity", target_id=hero["id"],
+                       key="aliases", value="the smuggler")
+            rb = await call(s, "mentions_rebuild", project_id=pid)
+            assert rb["rescanned_nodes"] > 0, rb
+            apps = await call(s, "entity_appearances", entity_id=hero["id"])
+            assert any(a["target_id"] == sid for a in apps), apps
+            # FTS search
+            hits = await call(s, "search", query="forged papers", project_id=pid)
+            assert any(h["id"] == sid for h in hits), hits
+            hits2 = await call(s, "search", query="forged", types="scene")
+            assert all(h["type"] == "scene" for h in hits2) and hits2, hits2
+            # template
+            tpl = await call(s, "template_apply", project_id=pid, template="story_circle")
+            assert len(tpl["beat_ids"]) == 8, tpl
+            # timeline
+            ev = await call(s, "entity_create", project_id=pid, kind="event",
+                            name="The Sundering", summary="The empire splits.")
+            await call(s, "meta_set", target_type="entity", target_id=ev["id"],
+                       key="story_date", value="1042-03-01")
+            tl = await call(s, "timeline_list", project_id=pid)
+            assert tl["dated"] and tl["dated"][0]["name"] == "The Sundering", tl
+            # stats
+            stats = await call(s, "project_stats", project_id=pid)
+            assert stats["total_words"] > 0, stats
+            assert any(t["name"] == "Mara" for t in stats["top_mentions"]), stats
+            # context bundle
+            await call(s, "meta_set", target_type="entity", target_id=ev["id"],
+                       key="ai_context", value="always")
+            bundle = await call(s, "context_bundle", scene_id=sid)
+            names = {e["name"] for e in bundle["entities_on_stage"]}
+            assert "Mara" in names and "The Sundering" in names, names
+            assert bundle["target"]["type"] == "scene", bundle["target"]
+            assert bundle["pov_character"]["name"] == "Mara", bundle["pov_character"]
+            # export
+            exp = await call(s, "export_manuscript", project_id=pid, format="markdown")
+            assert exp["bytes"] > 0 and exp["download"].startswith("/export/"), exp
+            expd = await call(s, "export_manuscript", project_id=pid, format="docx")
+            assert expd["bytes"] > 0, expd
+            import urllib.request as _ur
+            dl = _ur.Request(URL.replace("/mcp", exp["download"]),
+                             headers={"X-API-Key": "k-luna"})
+            with _ur.urlopen(dl, timeout=15) as resp:
+                assert resp.status == 200 and len(resp.read()) > 0
+            # project delete
+            junk = await call(s, "project_create", name="Throwaway")
+            await call(s, "project_delete", project_id=junk["id"])
+            projs = await call(s, "project_list")
+            assert all(p["id"] != junk["id"] for p in projs), projs
+            print("WAVE2 AUTHOR OK: scenes, meta, mentions, FTS, template, timeline, "
+                  "stats, bundle, export, project_delete")
+
+    # --- wave 2: editor blocked from scene writes, but proposals work on scenes
+    async with (await as_key("k-gpt")) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            blocked_sc = await call(s, "scene_update", scene_id=sid, content_md="NOPE")
+            assert "_error" in blocked_sc and "editor role" in blocked_sc["_error"], blocked_sc
+            blocked_meta = await call(s, "meta_set", target_type="scene", target_id=sid,
+                                      key="x", value="y")
+            assert "_error" in blocked_meta, blocked_meta
+            sprop = await call(s, "proposal_create", target_type="scene", target_id=sid,
+                               proposed_content_md="Mara slipped across at dusk; the forged papers held — barely.",
+                               rationale="rhythm")
+            assert sprop["status"] == "pending", sprop
+    async with (await as_key("k-luna")) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            sacc = await call(s, "proposal_accept", proposal_id=sprop["id"])
+            assert sacc["applied_as_rev"] == 3, sacc
+            print("WAVE2 EDITOR OK: scene writes blocked, scene proposal accepted as rev 3")
+
     # --- backups: author snapshots + pulls, editor blocked from both
     async with (await as_key("k-luna")) as (r, w, _):
         async with ClientSession(r, w) as s:

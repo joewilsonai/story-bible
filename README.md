@@ -91,17 +91,51 @@ header `X-API-Key: <chatgpt-editor-key>`.
 4. Anything can be undone: `revision_list` → `revision_restore` (restores by
    copying forward — history is never rewritten).
 
-## Tool inventory (30)
+## Tool inventory (49)
 
-- Projects: `project_create` `project_list` `project_get` `project_update`
+- Projects: `project_create` `project_list` `project_get` `project_update` `project_delete`
+  `project_stats`
 - Entities: `entity_create` `entity_get` `entity_list` `entity_update` `entity_delete`
-- Links: `link_create` `link_list` `link_delete`
+  `entity_appearances` — kinds: arc, narrative, character, faction, lore, event,
+  research, note, location, item, theme, thread, style
+- Links: `link_create` (typed + directional + optional `attrs` payload) `link_list` `link_delete`
 - Chapters: `chapter_create` `chapter_get` `chapter_list` `chapter_update` `chapter_delete`
-- Revisions: `revision_list` `revision_get` `revision_restore`
-- Comments: `comment_create` `comment_list` `comment_resolve`
+- Scenes: `scene_create` `scene_get` `scene_list` `scene_update` `scene_move` `scene_delete`
+  — the atomic prose/metadata unit under a chapter (synopsis, status, POV pointer);
+  scene-less chapters keep working unchanged
+- Metadata: `meta_set` `meta_get` — typed key/values on any project/entity/chapter/scene
+- Revisions: `revision_list` `revision_get` `revision_restore` (scenes included)
+- Comments: `comment_create` `comment_list` `comment_resolve` (scenes included)
 - Proposals: `proposal_create` `proposal_list` `proposal_get` `proposal_accept`
-  `proposal_reject`
-- Search: `search` (substring; FTS5 upgrade is the obvious v2)
+  `proposal_reject` (scenes included)
+- Search: `search` — FTS5 ranked full-text (stemmed) with type filters + substring fallback
+- Mentions: `mentions_rebuild` — name/alias mention index, auto-maintained on every
+  content write (aliases via meta key `aliases`, comma-separated)
+- Timeline: `timeline_list` — event entities ordered by `story_date` meta (story-time
+  vs. manuscript order, deliberately independent)
+- Structure: `template_list` `template_apply` — three_act, save_the_cat, heros_journey,
+  story_circle beat scaffolds
+- Context: `context_bundle` — one call assembling everything an AI co-writer needs
+  before drafting a chapter/scene: style guides, POV sheet, entities on stage,
+  prior-story synopses, open threads
+- Export: `export_manuscript` (markdown | html | docx | epub) `export_list` — download
+  via authed `GET /export/<file>`
+- Backups: `backup_now` `backup_list` — timed on-volume `VACUUM INTO` snapshots +
+  authed `GET /backup/latest?fresh=1` pull route (author keys)
+
+## Meta-key conventions (read by context_bundle and friends)
+
+| Key | On | Meaning |
+| --- | --- | --- |
+| `aliases` | entity | Comma-separated alternate names for mention detection |
+| `ai_context` | entity | `always` / `detected` (default) / `never` — context inclusion |
+| `reveal_after_chapter` | entity | Content withheld from bundles before chapter N (spoiler gate) |
+| `story_date` | event entity | ISO-style sortable story-time stamp for `timeline_list` |
+| `status` | thread entity | `planted` / `developing` / `paid_off` / `abandoned` |
+| `target_words`, `deadline` | project | Drive `project_stats` progress/pace math |
+
+Extra env vars: `STORYBIBLE_BACKUP_HOURS` (default 24; <=0 disables the timer),
+`STORYBIBLE_BACKUP_KEEP` (default 14).
 
 ## Notes
 
