@@ -2001,6 +2001,23 @@ def project_dashboard_get(project_id: str) -> dict:
             "SELECT id, analysis_type, target_id, status, created_at FROM analysis_runs "
             "WHERE project_id=? AND status IN ('queued','running') ORDER BY created_at",
             (project_id,)))
+        latest = conn.execute(
+            "SELECT id, analysis_type, target_type, target_id, target_rev, verdict, "
+            "scores_json, completed_at FROM analysis_runs WHERE project_id=? "
+            "AND status='complete' AND advisory=0 ORDER BY completed_at DESC LIMIT 1",
+            (project_id,)).fetchone()
+        if latest is not None:
+            cur = conn.execute(
+                f"SELECT rev FROM {TARGET_TABLES[latest['target_type']]} WHERE id=?",
+                (latest["target_id"],)).fetchone()
+            dash["latest_gate"] = {
+                "run_id": latest["id"], "analysis_type": latest["analysis_type"],
+                "verdict": latest["verdict"], "target_rev": latest["target_rev"],
+                "completed_at": latest["completed_at"],
+                "scores": json.loads(latest["scores_json"] or "{}"),
+                "stale": bool(cur) and cur["rev"] > latest["target_rev"]}
+        else:
+            dash["latest_gate"] = None
         dash["debt"] = narrative_debt_list(project_id)
         dash["seam"] = seam_get(project_id)
         return dash

@@ -316,6 +316,16 @@ async function vDesk(){
       <div class="fhead"><span class="chip ${f.severity}">${f.severity}</span><span class="cat">${esc(f.category)}</span></div>
       <div class="evq">"${esc(f.evidence_quote.slice(0,160))}${f.evidence_quote.length>160?"…":""}"</div>
       <div class="fix"><b>Smallest fix</b> ${esc(f.smallest_intervention)}</div></div>`;}
+  if(d.latest_gate){const g=d.latest_gate;
+    h+=`<div class='deskhead'>Latest gate — ${esc(g.analysis_type.replace(/_/g," "))} · rev ${g.target_rev}
+      <span class="chip ${esc(g.verdict)}" style="margin-left:.6rem">${esc(g.verdict)}</span>
+      ${g.stale?'<span class="chip stale">stale — chapter has moved</span>':""}</div>`;
+    for(const k of Object.keys(g.scores))
+      h+=`<div class="bar"><span class="bl">${esc(k.replace(/_/g," "))}</span>
+        <span class="bt"><span class="bf" style="width:${Math.min(100,g.scores[k])}%"></span></span>
+        <span class="bn">${g.scores[k]}</span></div>`;
+    h+=`<div class="editbar"><button class="btn2" onclick="VIEW={name:'run',id:'${g.run_id}'};render()">Full report</button></div>`;
+  }
   h+="<div class='deskhead'>Awaiting your ruling</div>";
   const aw=d.awaiting_owner;
   h+=`<div class="row" onclick="go('proposals')"><span class="no">${aw.pending_proposals.length}</span>
