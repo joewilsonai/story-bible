@@ -2607,6 +2607,199 @@ def backup_list() -> list[dict]:
             for p in sorted(BACKUP_DIR.glob("story-*.db"))]
 
 
+# ---------------------------------------------------------------- OAuth (minimal)
+
+import base64
+import hashlib
+import secrets as _secrets
+from datetime import timedelta
+
+PUBLIC_URL = os.environ.get("STORYBIBLE_PUBLIC_URL",
+                            "https://story-bible-production.up.railway.app")
+
+
+def _oauth_meta() -> bytes:
+    return json.dumps({
+        "issuer": PUBLIC_URL,
+        "authorization_endpoint": f"{PUBLIC_URL}/oauth/authorize",
+        "token_endpoint": f"{PUBLIC_URL}/oauth/token",
+        "registration_endpoint": f"{PUBLIC_URL}/oauth/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": ["storybible"],
+    }).encode()
+
+
+def _resource_meta() -> bytes:
+    return json.dumps({
+        "resource": f"{PUBLIC_URL}/mcp",
+        "authorization_servers": [PUBLIC_URL],
+        "bearer_methods_supported": ["header"],
+    }).encode()
+
+
+async def _read_body(receive) -> bytes:
+    body = b""
+    while True:
+        msg = await receive()
+        body += msg.get("body", b"")
+        if not msg.get("more_body"):
+            return body
+
+
+def _form(qs: str) -> dict:
+    out = {}
+    for pair in qs.split("&"):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            out[k] = urllib.parse.unquote_plus(v)
+    return out
+
+
+AUTHORIZE_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Story Bible — Authorize</title>
+<style>body{{background:#14110d;color:#e9e1d0;font-family:'Iowan Old Style',Palatino,Georgia,serif;
+display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
+.card{{width:min(420px,90vw);padding:3rem 2.4rem;border:1px solid #332c21;text-align:center;
+background:#1b1712}}h1{{font-weight:400;font-size:1.6rem;letter-spacing:.3em;text-transform:uppercase}}
+.rule{{width:56px;height:1px;background:#d0a04b;margin:1.1rem auto 1.4rem}}
+p{{color:#9a8f7a;font-style:italic;font-size:.95rem;margin:0 0 1.4rem}}
+input{{width:100%;box-sizing:border-box;padding:.7rem .9rem;background:#14110d;border:1px solid #332c21;
+color:#e9e1d0;font-family:ui-monospace,Menlo,monospace;font-size:.85rem}}
+button{{margin-top:1rem;width:100%;padding:.7rem;background:#d0a04b;border:none;color:#181307;
+font-size:.8rem;letter-spacing:.25em;text-transform:uppercase;cursor:pointer;font-family:ui-monospace,Menlo,monospace}}
+.err{{color:#c05b35;font-size:.85rem;margin-top:.9rem}}</style></head><body><div class="card">
+<h1>Story Bible</h1><div class="rule"></div>
+<p>A connector is asking for access. Paste an API key to grant it — the connector
+inherits that key's role.</p>
+<form method="POST" action="/oauth/authorize">
+<input type="hidden" name="redirect_uri" value="{redirect_uri}">
+<input type="hidden" name="state" value="{state}">
+<input type="hidden" name="code_challenge" value="{code_challenge}">
+<input type="password" name="key" placeholder="API key" autocomplete="off" autofocus>
+<button type="submit">Grant access</button></form>{err}</div></body></html>"""
+
+
+def _mint_tokens(conn, key_name: str, role: str) -> dict:
+    access = "sbt_" + _secrets.token_hex(24)
+    refresh = "sbr_" + _secrets.token_hex(24)
+    now = datetime.now(timezone.utc)
+    conn.execute("INSERT INTO oauth_tokens (token, kind, key_name, role, created_at, expires_at) "
+                 "VALUES (?,?,?,?,?,?)",
+                 (access, "access", key_name, role, now.isoformat(),
+                  (now + timedelta(days=30)).isoformat()))
+    conn.execute("INSERT INTO oauth_tokens (token, kind, key_name, role, created_at, expires_at) "
+                 "VALUES (?,?,?,?,?,?)",
+                 (refresh, "refresh", key_name, role, now.isoformat(),
+                  (now + timedelta(days=365)).isoformat()))
+    return {"access_token": access, "token_type": "Bearer",
+            "expires_in": 30 * 86400, "refresh_token": refresh, "scope": "storybible"}
+
+
+def _token_identity(token: str) -> dict | None:
+    if not token.startswith("sbt_"):
+        return None
+    conn = _db()
+    try:
+        row = conn.execute("SELECT key_name, role, expires_at FROM oauth_tokens "
+                           "WHERE token=? AND kind='access'", (token,)).fetchone()
+    finally:
+        conn.close()
+    if row is None or row["expires_at"] < _now():
+        return None
+    return {"name": row["key_name"], "role": row["role"]}
+
+
+import urllib.parse
+
+
+async def _handle_oauth(scope, receive, send, keys) -> bool:
+    """OAuth + discovery routes (all pre-auth). Returns True if handled."""
+    path = scope["path"]
+    method = scope.get("method", "GET")
+
+    async def respond(status, body, ctype=b"application/json", extra=()):
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", ctype)] + list(extra)})
+        await send({"type": "http.response.body", "body": body})
+
+    if path in ("/.well-known/oauth-authorization-server",
+                "/.well-known/oauth-authorization-server/mcp"):
+        await respond(200, _oauth_meta()); return True
+    if path in ("/.well-known/oauth-protected-resource",
+                "/.well-known/oauth-protected-resource/mcp"):
+        await respond(200, _resource_meta()); return True
+    if path == "/oauth/register" and method == "POST":
+        await _read_body(receive)
+        await respond(201, json.dumps({
+            "client_id": "sb-" + _secrets.token_hex(8),
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"]}).encode())
+        return True
+    if path == "/oauth/authorize" and method == "GET":
+        q = _form(scope.get("query_string", b"").decode())
+        page = AUTHORIZE_PAGE.format(
+            redirect_uri=q.get("redirect_uri", ""), state=q.get("state", ""),
+            code_challenge=q.get("code_challenge", ""), err="")
+        await respond(200, page.encode(), b"text/html; charset=utf-8"); return True
+    if path == "/oauth/authorize" and method == "POST":
+        f = _form((await _read_body(receive)).decode())
+        ident = keys.get(f.get("key", "").strip())
+        if ident is None:
+            page = AUTHORIZE_PAGE.format(redirect_uri=f.get("redirect_uri", ""),
+                                         state=f.get("state", ""),
+                                         code_challenge=f.get("code_challenge", ""),
+                                         err="<div class='err'>That key didn't open it.</div>")
+            await respond(200, page.encode(), b"text/html; charset=utf-8"); return True
+        code = "sbc_" + _secrets.token_hex(24)
+        now = datetime.now(timezone.utc)
+        conn = _db()
+        try:
+            with conn:
+                conn.execute("INSERT INTO oauth_codes (code, key_name, role, challenge, "
+                             "redirect_uri, created_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+                             (code, ident["name"], ident["role"],
+                              f.get("code_challenge", ""), f.get("redirect_uri", ""),
+                              now.isoformat(), (now + timedelta(minutes=10)).isoformat()))
+        finally:
+            conn.close()
+        sep = "&" if "?" in f.get("redirect_uri", "") else "?"
+        loc = f"{f.get('redirect_uri','')}{sep}code={code}&state={urllib.parse.quote(f.get('state',''))}"
+        await respond(302, b"", extra=[(b"location", loc.encode())]); return True
+    if path == "/oauth/token" and method == "POST":
+        f = _form((await _read_body(receive)).decode())
+        conn = _db()
+        try:
+            with conn:
+                if f.get("grant_type") == "authorization_code":
+                    row = conn.execute("SELECT * FROM oauth_codes WHERE code=?",
+                                       (f.get("code", ""),)).fetchone()
+                    if (row is None or row["used"] or row["expires_at"] < _now()
+                            or row["redirect_uri"] != f.get("redirect_uri", "")):
+                        await respond(400, b'{"error": "invalid_grant"}'); return True
+                    digest = hashlib.sha256(f.get("code_verifier", "").encode()).digest()
+                    if base64.urlsafe_b64encode(digest).rstrip(b"=").decode() != row["challenge"]:
+                        await respond(400, b'{"error": "invalid_grant", "error_description": "PKCE"}')
+                        return True
+                    conn.execute("UPDATE oauth_codes SET used=1 WHERE code=?", (row["code"],))
+                    out = _mint_tokens(conn, row["key_name"], row["role"])
+                    await respond(200, json.dumps(out).encode()); return True
+                if f.get("grant_type") == "refresh_token":
+                    row = conn.execute("SELECT * FROM oauth_tokens WHERE token=? AND kind='refresh'",
+                                       (f.get("refresh_token", ""),)).fetchone()
+                    if row is None or row["expires_at"] < _now():
+                        await respond(400, b'{"error": "invalid_grant"}'); return True
+                    out = _mint_tokens(conn, row["key_name"], row["role"])
+                    await respond(200, json.dumps(out).encode()); return True
+        finally:
+            conn.close()
+        await respond(400, b'{"error": "unsupported_grant_type"}'); return True
+    return False
+
+
 # ---------------------------------------------------------------- ASGI app + auth
 
 def build_app():
@@ -2641,10 +2834,29 @@ def build_app():
                                     (b"content-length", str(len(body)).encode())]})
             await send({"type": "http.response.body", "body": body})
             return
+        if await _handle_oauth(scope, receive, send, keys):
+            return
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         key = headers.get("x-api-key", "")
         if not key and headers.get("authorization", "").lower().startswith("bearer "):
             key = headers["authorization"][7:]
+        if key.startswith("sbt_"):
+            # OAuth access token: full role of the key granted at the consent screen
+            ident = _token_identity(key)
+            if ident is None:
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"application/json"),
+                                        (b"www-authenticate",
+                                         f'Bearer resource_metadata="{PUBLIC_URL}/.well-known/oauth-protected-resource"'.encode())]})
+                await send({"type": "http.response.body",
+                            "body": b'{"error": "expired or invalid token"}'})
+                return
+            token = CALLER.set(ident)
+            try:
+                await inner(scope, receive, send)
+            finally:
+                CALLER.reset(token)
+            return
         url_key = False
         if not key:
             # Clients whose connector UIs can't set headers (ChatGPT custom connectors)
@@ -2664,7 +2876,9 @@ def build_app():
             ident = {"name": ident["name"], "role": "editor"}
         if ident is None:
             await send({"type": "http.response.start", "status": 401,
-                        "headers": [(b"content-type", b"application/json")]})
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"www-authenticate",
+                                     f'Bearer resource_metadata="{PUBLIC_URL}/.well-known/oauth-protected-resource"'.encode())]})
             await send({"type": "http.response.body",
                         "body": b'{"error": "missing or invalid API key"}'})
             return

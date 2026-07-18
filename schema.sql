@@ -120,6 +120,28 @@ CREATE TABLE IF NOT EXISTS node_meta (
     PRIMARY KEY (target_type, target_id, key)
 );
 
+-- OAuth (minimal, for header-less cloud connectors): authorization codes and
+-- bearer tokens minted against existing API keys. Tokens carry the key's FULL
+-- role (unlike URL-keys) because the human pasted the key at the consent screen.
+CREATE TABLE IF NOT EXISTS oauth_codes (
+    code           TEXT PRIMARY KEY,
+    key_name       TEXT NOT NULL,
+    role           TEXT NOT NULL,
+    challenge      TEXT NOT NULL,             -- PKCE S256 challenge
+    redirect_uri   TEXT NOT NULL,
+    used           INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL,
+    expires_at     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+    token          TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL DEFAULT 'access',   -- access | refresh
+    key_name       TEXT NOT NULL,
+    role           TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    expires_at     TEXT NOT NULL
+);
+
 -- Parts: optional grouping layer above chapters (Part → Chapter → Scene).
 CREATE TABLE IF NOT EXISTS parts (
     id          TEXT PRIMARY KEY,
