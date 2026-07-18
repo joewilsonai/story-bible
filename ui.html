@@ -101,10 +101,10 @@ h2.viewtitle{font-family:var(--display);font-weight:400;font-size:1.7rem;margin-
 .notecard .nbody{font-size:.92rem;color:var(--dim);line-height:1.55}
 
 /* ---------- editorial ink ---------- */
-u.ann{text-decoration:none;border-bottom:2px solid;padding-bottom:1px;cursor:help}
-.ann-strong{border-color:#8fae72;background:rgba(143,174,114,.10)}
-.ann-weak{border-color:#d05b3a;background:rgba(208,91,58,.11)}
-.ann-mid{border-color:#c9a35a;background:rgba(201,163,90,.10)}
+u.ann{text-decoration:none;border-bottom:3px solid;padding-bottom:1px;cursor:help;border-radius:2px 2px 0 0}
+.ann-strong{border-color:#a3cc80;background:rgba(150,190,110,.20)}
+.ann-weak{border-color:#ef6a3e;background:rgba(224,90,50,.22)}
+.ann-mid{border-color:#e0b45e;background:rgba(216,170,90,.20)}
 .inklegend{display:flex;gap:1.1rem;justify-content:center;font-family:var(--mono);
   font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:.6rem 0 1.4rem}
 .inklegend span{border-bottom:2px solid;padding-bottom:1px}
@@ -205,15 +205,34 @@ function inkMark(text, anns){
     cls:(f.severity==="blocking"||f.severity==="major")?"ann-weak":"ann-mid",
     tip:f.severity.toUpperCase()+" · "+f.category+" · "+f.explanation
         +(f.smallest_intervention?" — FIX: "+f.smallest_intervention:"")}));
-  items = items.filter(it=>it.q && !it.q.includes("\n\n"));
+  items = items.filter(it=>it.q && it.q.trim().length>3);
   items.sort((a,b)=>b.q.length-a.q.length);
+  function find(t, q){
+    let idx = t.indexOf(q);
+    if(idx>=0) return {idx, len:q.length};
+    // whitespace-flexible fallback: survives paragraph breaks + normalization drift
+    const pat = q.trim().split(/\s+/)
+      .map(w=>w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("[\\s]+");
+    try{const m = t.match(new RegExp(pat)); if(m) return {idx:m.index, len:m[0].length};}
+    catch(e){}
+    return null;
+  }
   const marks = [];
   for(const it of items){
-    const idx = text.indexOf(it.q);
-    if(idx < 0) continue;
-    const n = marks.length;
-    text = text.slice(0,idx)+`⟦S${n}⟧`+it.q+`⟦E${n}⟧`+text.slice(idx+it.q.length);
-    marks.push(it);
+    const f = find(text, it.q);
+    if(!f) continue;
+    // a quote spanning paragraph breaks gets inked per paragraph chunk
+    const span = text.slice(f.idx, f.idx+f.len);
+    const chunks = span.split(/\n{2,}/).filter(c=>c.trim().length>10);
+    let cursor = f.idx;
+    for(const chunk of chunks){
+      const ci = text.indexOf(chunk, cursor);
+      if(ci<0) continue;
+      const n = marks.length;
+      text = text.slice(0,ci)+`⟦S${n}⟧`+chunk+`⟦E${n}⟧`+text.slice(ci+chunk.length);
+      cursor = ci + chunk.length + 10;
+      marks.push(it);
+    }
   }
   return {text, marks};
 }
