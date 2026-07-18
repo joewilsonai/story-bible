@@ -687,6 +687,94 @@ cold_read_run        (Joe-triggered only)
 - The seam pointer is always queryable, and every research claim knows which side of it it sits on.
 - Second-opinion and cold-read runs exist only when Joe triggered them and are labeled advisory with full model metadata.
 
+## H. Fact-checking engine (added at Joe's direction, 2026-07-18, pre-ratification)
+
+Joe's requirement: the book must be as technically, scientifically, and politically
+accurate as possible. This section extends §7.7 (research claims), §13 (continuity),
+and B (seam pointer) into an active verification system.
+
+### H.1 Claims are first-class and extracted, not volunteered
+Any factual assertion in prose — technical capability, scientific mechanism,
+political event, institutional behavior, date, statistic, geography, law, medicine —
+should exist as a research claim linked to the scenes that assert it.
+- Fable logs claims at drafting time (it knows what it asserted vs. invented).
+- A claim-extraction sweep (`claim_extract_run`) can be run over any chapter to
+  catch assertions that slipped through; extraction proposes claims, an author
+  accepts them.
+- Every claim carries: domain (technical | scientific | political | historical |
+  geographic | medical | legal | economic | cultural), classification (fact |
+  inference | projection | deliberate_fiction), applicable story date, and
+  seam side (see H.3).
+
+### H.2 Verification is evidence-gathering, not editorial judgment
+Fact verification does NOT violate the one-editor rule (§3.8): Sol owns literary
+judgment; the fact engine owns the record. Clean lanes:
+- Sol, during gates, may FLAG a claim as suspect (it already grades technical and
+  institutional plausibility). A flag is not a verdict.
+- A verification run (`research_claim_verify`) checks the claim against real
+  sources and files an immutable verification record: verdict (verified | false |
+  disputed | unverifiable | outdated), cited sources (URL, title, publisher,
+  access date, quote, source type), confidence, and notes. Contradictory sources
+  are recorded side by side, never collapsed.
+- Verifications are attributed (which model/agent ran them) and pinned to the
+  claim revision, like every other analysis in the system.
+- Standing fact-runner: Luna (web-capable, in the room, free). Fable may also
+  verify during research. Second-opinion verification follows §3.14 rules.
+
+### H.3 The seam divides accuracy from plausibility
+The seam pointer (B) is the load-bearing concept:
+- **Pre-seam claims** (real world, on or before the last verified event) must be
+  TRUE — source-cited, verified, and correct as of their applicable date.
+- **Post-seam claims** (the invented continuation) must be PLAUSIBLE — each
+  significant projection links to the pre-seam facts it extrapolates from. The
+  fact engine checks the foundation; Sol judges the extrapolation.
+- **Reality catches up.** As time passes and the seam advances, projections
+  become checkable. `claim_reverify_sweep` re-verifies claims the seam has
+  crossed and marks them verified, false, or outdated. A projection that reality
+  falsified becomes a finding, and Joe decides: revise, keep as
+  deliberate_fiction (with a fictionalization record), or accept the divergence.
+
+### H.4 Political accuracy discipline
+Political and institutional claims get stricter sourcing:
+- Prefer primary sources (votes, filings, transcripts, official records, court
+  documents) over commentary; source type is recorded on every citation.
+- A political claim needs a primary source OR two independent secondary sources.
+- Characters may be wrong, biased, or lying — that is characterization, not
+  error. The claim record marks speaker-attributed assertions
+  (`asserted_by_character`) so in-world falsehood is deliberate and tracked,
+  never accidental.
+
+### H.5 Deterministic gates
+- A chapter may not enter `final` while any linked claim is verified-false or
+  blocking-flagged, unless Joe logs a decision (which either creates a
+  fictionalization record or accepts the divergence with rationale).
+- Documentary, institutional, and technical narrative modes require their
+  significant assertions to have claim linkage before the Chapter Gate runs.
+- Claim staleness is mechanical: seam movement past a claim's applicable date
+  marks its verification stale until re-swept.
+
+### H.6 Tools to add
+```
+claim_extract_run          (LLM job via runner; proposes claims)
+research_claim_verify      (files an immutable, source-cited verification)
+research_claim_verifications (verification history for a claim)
+fact_check_run             (chapter-level sweep: extract + verify + report)
+claim_reverify_sweep       (re-verify stale / seam-crossed claims)
+source_create / source_get / source_list  (reusable source records, typed)
+```
+
+### H.7 Acceptance criteria
+- Every significant factual assertion in documentary/institutional/technical
+  prose links to a research claim.
+- No chapter enters final with a verified-false claim absent a logged Joe
+  decision; deliberate divergence always produces a fictionalization record.
+- Pre-seam claims carry citations; post-seam claims link their pre-seam basis.
+- Verifications are immutable, source-cited, attributed, and re-runnable; seam
+  advancement triggers re-verification of crossed claims.
+- Political claims meet the H.4 sourcing bar, with source types recorded.
+- In-world false statements by characters are marked as such — the system can
+  always distinguish "the book is wrong" from "the character is wrong."
+
 ## G. Build order — thin spine first (constrains §19)
 The studio must not become the reason the book stalls. Ship in this order, and move daily work into the tool at step 4:
 1. Projects, canon entities, chapters/scenes with narrative-scoping metadata.
@@ -712,3 +800,4 @@ Every phase after step 4 happens alongside chapters getting written, not instead
 | 5 | Dictation audio storage | Audio on the DB volume will not scale; use object storage (Railway bucket/R2) when Phase C lands. Decide at step 6, not before. |
 | 6 | Web UI evolution | The existing read-only `/ui` grows toward §15 incrementally (dashboard priorities first). No separate frontend app unless Joe wants one. |
 | 7 | Phase 0 status | Already complete as of 7/18 morning (49 tools, FTS, scenes, export, backups verified, e2e green, Codex-reviewed). G-step 1–3 is the next build. |
+| 8 | Fact-engine runner + build position | Luna = standing fact-runner (web-capable, in the room); Fable verifies during research; Sol flags but never verdicts facts. Build claims/verifications storage in G-step 3 (deterministic, cheap); extraction/verification sweeps land with G-step 5 alongside Sol runs. Section H added at Joe's direction 7/18. |
