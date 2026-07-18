@@ -2025,23 +2025,29 @@ def project_dashboard_get(project_id: str) -> dict:
             "SELECT id, analysis_type, target_id, status, created_at FROM analysis_runs "
             "WHERE project_id=? AND status IN ('queued','running') ORDER BY created_at",
             (project_id,)))
-        latest = conn.execute(
-            "SELECT id, analysis_type, target_type, target_id, target_rev, verdict, "
-            "scores_json, completed_at FROM analysis_runs WHERE project_id=? "
-            "AND status='complete' AND advisory=0 ORDER BY completed_at DESC LIMIT 1",
-            (project_id,)).fetchone()
-        if latest is not None:
+        # Latest completed gate PER MODEL (dual-review governance: Sol outside,
+        # Luna inside; disagreements are the point and both belong on the Desk).
+        gates, seen_models = [], set()
+        for latest in conn.execute(
+                "SELECT id, analysis_type, target_type, target_id, target_rev, verdict, "
+                "model, completed_by, scores_json, completed_at FROM analysis_runs "
+                "WHERE project_id=? AND status='complete' AND advisory=0 "
+                "ORDER BY completed_at DESC", (project_id,)):
+            if latest["model"] in seen_models:
+                continue
+            seen_models.add(latest["model"])
             cur = conn.execute(
                 f"SELECT rev FROM {TARGET_TABLES[latest['target_type']]} WHERE id=?",
                 (latest["target_id"],)).fetchone()
-            dash["latest_gate"] = {
+            gates.append({
                 "run_id": latest["id"], "analysis_type": latest["analysis_type"],
                 "verdict": latest["verdict"], "target_rev": latest["target_rev"],
+                "model": latest["model"], "completed_by": latest["completed_by"],
                 "completed_at": latest["completed_at"],
                 "scores": json.loads(latest["scores_json"] or "{}"),
-                "stale": bool(cur) and cur["rev"] > latest["target_rev"]}
-        else:
-            dash["latest_gate"] = None
+                "stale": bool(cur) and cur["rev"] > latest["target_rev"]})
+        dash["latest_gates"] = gates
+        dash["latest_gate"] = gates[0] if gates else None
         dash["debt"] = narrative_debt_list(project_id)
         dash["seam"] = seam_get(project_id)
         return dash
