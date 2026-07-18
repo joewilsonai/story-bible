@@ -116,6 +116,36 @@ async def main():
             assert any(h["type"] == "chapter" for h in hits) or True  # content changed; just ensure no crash
             print("AUTHOR OK: accept, attribution, restore, staleness guard, force")
 
+    # --- backups: author snapshots + pulls, editor blocked from both
+    async with (await as_key("k-luna")) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            snap = await call(s, "backup_now")
+            assert snap["bytes"] > 0 and snap["file"].startswith("story-"), snap
+            listed = await call(s, "backup_list")
+            assert any(b["file"] == snap["file"] for b in listed), listed
+    async with (await as_key("k-gpt")) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            blocked3 = await call(s, "backup_now")
+            assert "_error" in blocked3 and "editor role" in blocked3["_error"], blocked3
+    import urllib.error
+    import urllib.request
+    pull = urllib.request.Request(URL.replace("/mcp", "/backup/latest?fresh=1"),
+                                  headers={"X-API-Key": "k-luna"})
+    with urllib.request.urlopen(pull, timeout=15) as resp:
+        body = resp.read()
+        assert resp.status == 200 and len(body) > 0
+    try:
+        deny = urllib.request.Request(URL.replace("/mcp", "/backup/latest"),
+                                      headers={"X-API-Key": "k-gpt"})
+        urllib.request.urlopen(deny, timeout=15)
+        print("FAIL: editor key pulled a backup")
+        raise SystemExit(1)
+    except urllib.error.HTTPError as e:
+        assert e.code == 403, e.code
+    print("BACKUP OK: snapshot, list, editor blocked, authed pull")
+
     # --- bad key rejected
     try:
         async with (await as_key("k-wrong")) as (r, w, _):

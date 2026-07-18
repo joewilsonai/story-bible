@@ -39,6 +39,8 @@ import contextvars
 import os
 import sqlite3
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +52,11 @@ DB_PATH = Path(os.environ.get("STORYBIBLE_DB", "~/.story-bible/story.db")).expan
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # STORYBIBLE_PORT wins; PORT is honored for Railway/Heroku-style platforms that inject it.
 PORT = int(os.environ.get("STORYBIBLE_PORT") or os.environ.get("PORT") or "8787")
+
+# On-volume snapshot settings. BACKUP_HOURS <= 0 disables the timer (tools still work).
+BACKUP_DIR = DB_PATH.parent / "backups"
+BACKUP_HOURS = float(os.environ.get("STORYBIBLE_BACKUP_HOURS", "24"))
+BACKUP_KEEP = int(os.environ.get("STORYBIBLE_BACKUP_KEEP", "14"))
 
 ENTITY_KINDS = {"arc", "narrative", "character", "faction", "lore", "event", "research", "note"}
 CHAPTER_STATUSES = {"draft", "revised", "final"}
@@ -652,6 +659,64 @@ def search(query: str, project_id: str | None = None, limit: int = 20) -> list[d
     return out[:limit]
 
 
+# ---------------------------------------------------------------- backups
+
+def _do_backup(reason: str = "scheduled") -> dict:
+    """Write a consistent point-in-time snapshot via VACUUM INTO and rotate old ones."""
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest = BACKUP_DIR / f"story-{stamp}.db"
+    if dest.exists():  # same-second rerun: VACUUM INTO refuses to overwrite
+        dest.unlink()
+    conn = _db()
+    try:
+        conn.execute("VACUUM INTO ?", (str(dest),))
+    finally:
+        conn.close()
+    rotated = []
+    if BACKUP_KEEP > 0:
+        for old in sorted(BACKUP_DIR.glob("story-*.db"))[:-BACKUP_KEEP]:
+            old.unlink()
+            rotated.append(old.name)
+    return {"file": dest.name, "bytes": dest.stat().st_size, "reason": reason,
+            "rotated_out": rotated, "created_at": _now()}
+
+
+def _latest_backup() -> Path | None:
+    if not BACKUP_DIR.is_dir():
+        return None
+    snaps = sorted(BACKUP_DIR.glob("story-*.db"))
+    return snaps[-1] if snaps else None
+
+
+def _backup_loop():
+    while True:
+        time.sleep(BACKUP_HOURS * 3600)
+        try:
+            info = _do_backup()
+            print(f"[story-bible] backup {info['file']} ({info['bytes']}B)")
+        except Exception as e:  # the loop must survive a bad night
+            print(f"[story-bible] backup FAILED: {e}", file=sys.stderr)
+
+
+@mcp.tool()
+def backup_now() -> dict:
+    """Snapshot the database to the on-volume backups directory immediately.
+    Author role required."""
+    _require_author()
+    return _do_backup("manual")
+
+
+@mcp.tool()
+def backup_list() -> list[dict]:
+    """List on-volume database snapshots, oldest first. Any role."""
+    if not BACKUP_DIR.is_dir():
+        return []
+    return [{"file": p.name, "bytes": p.stat().st_size,
+             "modified": datetime.fromtimestamp(p.stat().st_mtime, timezone.utc).isoformat()}
+            for p in sorted(BACKUP_DIR.glob("story-*.db"))]
+
+
 # ---------------------------------------------------------------- ASGI app + auth
 
 def build_app():
@@ -682,6 +747,27 @@ def build_app():
             await send({"type": "http.response.body",
                         "body": b'{"error": "missing or invalid API key"}'})
             return
+        if scope["path"] == "/backup/latest" and scope.get("method", "GET") == "GET":
+            # Offsite-pull route: streams the newest snapshot (author keys only).
+            if ident["role"] != "author":
+                await send({"type": "http.response.start", "status": 403,
+                            "headers": [(b"content-type", b"application/json")]})
+                await send({"type": "http.response.body",
+                            "body": b'{"error": "author key required for backup download"}'})
+                return
+            if b"fresh=1" in scope.get("query_string", b"") or _latest_backup() is None:
+                _do_backup("pull")
+            snap = _latest_backup()
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/octet-stream"),
+                                    (b"content-disposition",
+                                     f'attachment; filename="{snap.name}"'.encode()),
+                                    (b"content-length", str(snap.stat().st_size).encode())]})
+            with snap.open("rb") as f:
+                while chunk := f.read(1 << 20):
+                    await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            await send({"type": "http.response.body", "body": b""})
+            return
         token = CALLER.set(ident)
         try:
             await inner(scope, receive, send)
@@ -695,5 +781,12 @@ if __name__ == "__main__":
     import uvicorn
 
     _init_db()
+    if BACKUP_HOURS > 0:
+        try:
+            info = _do_backup("boot")
+            print(f"[story-bible] boot backup {info['file']} ({info['bytes']}B)")
+        except Exception as e:
+            print(f"[story-bible] boot backup failed: {e}", file=sys.stderr)
+        threading.Thread(target=_backup_loop, daemon=True, name="backup-loop").start()
     print(f"[story-bible] db={DB_PATH} port={PORT} keys={len(_load_keys())}")
     uvicorn.run(build_app(), host="0.0.0.0", port=PORT)
