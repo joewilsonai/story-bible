@@ -245,6 +245,9 @@ async function boot(){
 }
 
 async function refresh(){
+  PROJECTS = await api("project_list");
+  if(PROJECT && !PROJECTS.some(p=>p.id===PROJECT.id)) PROJECT = PROJECTS[0]||null;
+  if(!PROJECT) PROJECT = PROJECTS[0]||null;
   if(!PROJECT){main("<div class='empty'>No projects yet. The first chapter is waiting to happen.</div>");return}
   const [proj, pending] = await Promise.all([
     api("project_get",{project_id:PROJECT.id}),
