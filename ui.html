@@ -223,6 +223,8 @@ function inline(s){
                .replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<em>$2</em>");
 }
 function words(chars){return chars? "~"+(Math.round(chars/6/10)*10).toLocaleString()+" w":""}
+function when(iso){if(!iso)return"";const d=new Date(iso);
+  return d.toLocaleDateString([],{month:"short",day:"numeric"})+" "+d.toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}
 function stagger(){document.querySelectorAll("main .row, main .card, main .bar, main .propblock")
   .forEach((el,i)=>el.style.animationDelay=Math.min(i*35,420)+"ms")}
 
@@ -308,7 +310,7 @@ async function vDesk(){
   if(d.what_changed.length){h+="<div class='deskhead'>What changed</div>";
     for(const c of d.what_changed) h+=`<div class="row" style="cursor:default">
       <span class="no">r${c.rev}</span><span class="t" style="font-size:.98rem">${esc(c.what)}</span>
-      <span class="m">${esc(c.by)}${c.note?" · "+esc(c.note):""}</span></div>`;}
+      <span class="m">${when(c.at)} · ${esc(c.by)}${c.note?" · "+esc(c.note):""}</span></div>`;}
   if(d.protect.length){h+="<div class='deskhead'>Working — protect these</div>";
     for(const p of d.protect) h+=`<div class="evq">"${esc(p.evidence_quote)}"<div style="font-style:normal;color:var(--dim);font-size:.85rem;margin-top:.3rem">${esc(p.explanation)}</div></div>`;}
   if(d.blocking_major_findings.length){h+="<div class='deskhead'>Blocking & major findings</div>";
@@ -401,7 +403,7 @@ async function vManuscript(){
     h+=`<div class="row" onclick="VIEW={name:'chapter',id:'${c.id}'};render()">
       <span class="no">${String(i+1).padStart(2,"0")}</span>
       <span class="t">${esc(c.title)}</span>
-      <span class="m">${words(c.content_chars)}</span>
+      <span class="m">r${c.rev} · ${when(c.updated_at)} · ${words(c.content_chars)}</span>
       <span class="chip ${c.status}">${c.status}</span></div>`;
   });
   main(h);
@@ -411,7 +413,9 @@ async function vChapter(id){
   const ch = await api("chapter_get",{chapter_id:id});
   let h=`<div class="crumb"><a onclick="go('manuscript')">Manuscript</a> / ${esc(ch.title)}
          <span class="chip ${ch.status}" style="margin-left:.8rem">${ch.status}</span></div>`;
-  h+=`<div class="chaptertitle">${esc(ch.title)}</div><div class="chapterrule"></div>`;
+  h+=`<div class="chaptertitle">${esc(ch.title)}</div>
+      <div class="statlbl" style="text-align:center;margin-bottom:0">rev ${ch.rev} · updated ${when(ch.updated_at)} · ${esc(ch.status)}</div>
+      <div class="chapterrule"></div>`;
   if(ch.scenes && ch.scenes.length){
     const scenes = await Promise.all(ch.scenes.map(s=>api("scene_get",{scene_id:s.id})));
     for(const s of scenes){
@@ -473,6 +477,7 @@ async function vEntity(id){
   ]);
   let h=`<div class="crumb"><a onclick="go('${VIEW.back||('kind:'+e.kind)}')">${e.kind}s</a> / ${esc(e.name)}</div>`;
   h+=`<div class="chaptertitle" style="text-align:left">${esc(e.name)}</div>`;
+  h+=`<div class="statlbl" style="margin-bottom:1rem">rev ${e.rev} · updated ${when(e.updated_at)} · by ${esc(e.created_by)}</div>`;
   if(e.summary) h+=`<div class="lede">${esc(e.summary)}</div>`;
   h+=`<div class="prose">${md(e.content_md)}</div>`;
   const mk = Object.keys(meta);
