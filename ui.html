@@ -102,13 +102,16 @@ h2.viewtitle{font-family:var(--display);font-weight:400;font-size:1.7rem;margin-
 
 /* ---------- editorial ink ---------- */
 u.ann{text-decoration:none;border-bottom:3px solid;padding-bottom:1px;cursor:help;border-radius:2px 2px 0 0}
-.ann-strong{border-color:#a3cc80;background:rgba(150,190,110,.20)}
-.ann-weak{border-color:#ef6a3e;background:rgba(224,90,50,.22)}
-.ann-mid{border-color:#e0b45e;background:rgba(216,170,90,.20)}
+.ann-strong{color:#b9e08f;border-color:#8fc060;background:rgba(150,190,110,.12)}
+.ann-weak{color:#ff9068;border-color:#ff6a3c;background:rgba(224,90,50,.14)}
+.ann-mid{color:#ffd27f;border-color:#e0a94e;background:rgba(216,170,90,.13)}
+u.ann strong,u.ann em{color:inherit}
 .inklegend{display:flex;gap:1.1rem;justify-content:center;font-family:var(--mono);
   font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:.6rem 0 1.4rem}
 .inklegend span{border-bottom:2px solid;padding-bottom:1px}
-.inklegend .lg{border-color:#8fae72}.inklegend .lr{border-color:#d05b3a}.inklegend .ly{border-color:#c9a35a}
+.inklegend .lg{border-color:#8fc060;color:#b9e08f}
+.inklegend .lr{border-color:#ff6a3c;color:#ff9068}
+.inklegend .ly{border-color:#e0a94e;color:#ffd27f}
 
 /* ---------- reading ---------- */
 .prose{font-size:1.06rem;line-height:1.85;color:var(--text)}
