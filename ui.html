@@ -366,6 +366,7 @@ function drawNav(proj, pendingN){
   h += navItem("desk","The Desk","");
   h += navItem("manuscript","Manuscript", proj.chapter_count||"");
   h += navItem("reviews","Reviews","");
+  h += navItem("history","History","");
   h += navItem("proposals","Proposals", pendingN, pendingN>0);
   h += navItem("stats","The Ledger","");
   h += "<div class='sect'>Bible</div>";
@@ -394,6 +395,7 @@ async function render(){
     else if(VIEW.name==="manuscript") await vManuscript();
     else if(VIEW.name==="chapter") await vChapter(VIEW.id);
     else if(VIEW.name==="reviews") await vReviews();
+    else if(VIEW.name==="history") await vHistory();
     else if(VIEW.name==="run") await vRun(VIEW.id);
     else if(VIEW.name==="proposals") await vProposals();
     else if(VIEW.name==="stats") await vStats();
@@ -446,6 +448,25 @@ async function vDesk(){
     <tr><td>stale analyses</td><td>${db.stale_analyses}</td></tr></table>`;
   if(d.seam && d.seam.last_verified)
     h+=`<div class="statlbl" style="margin-top:1.4rem">seam · reality through: ${esc(d.seam.last_verified.slice(0,80))}</div>`;
+  main(h);
+}
+
+async function vHistory(){
+  const items = await api("project_history_get",{project_id:PROJECT.id});
+  let h="<h2 class='viewtitle'>History</h2><div class='statlbl'>everything fixed, ruled, verified, and revised — nothing here is ever deleted</div>";
+  if(!items.length){main(h+"<div class='empty'>The record awaits its first entry.</div>");return}
+  let day="";
+  for(const it of items){
+    const d=new Date(it.at).toLocaleDateString([],{weekday:"short",month:"short",day:"numeric"});
+    if(d!==day){day=d;h+=`<div class="deskhead">${d}</div>`}
+    const kc = it.kind==="revision"?"final":it.kind.startsWith("finding")?"revised":
+               it.kind==="decision"?"pending":it.kind.startsWith("fact")?"revised":"outline";
+    h+=`<div class="notecard"><div class="who">
+        ${new Date(it.at).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}
+        · <span class="chip ${kc}">${esc(it.kind)}</span> · ${esc(it.who||"")}</div>
+        <div class="nbody" style="color:var(--text)">${esc(it.what)}</div>
+        ${it.detail?`<div class="nbody">${esc(it.detail)}</div>`:""}</div>`;
+  }
   main(h);
 }
 

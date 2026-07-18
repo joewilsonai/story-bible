@@ -1991,6 +1991,64 @@ def narrative_debt_list(project_id: str) -> dict:
 
 
 @mcp.tool()
+def project_history_get(project_id: str, limit: int = 250) -> list[dict]:
+    """The complete editorial ledger, newest first: every revision (with its note),
+    every finding transition (resolved/intentional/deferred/incorrect with its note),
+    every resolved margin note, every owner decision, every fact verification.
+    Nothing is ever deleted from this record; this is the fixed-over-time view."""
+    out: list[dict] = []
+    with _db() as conn:
+        if conn.execute("SELECT 1 FROM projects WHERE id=? AND deleted=0",
+                        (project_id,)).fetchone() is None:
+            raise ValueError(f"project {project_id} not found")
+        for r in conn.execute("SELECT * FROM revisions ORDER BY created_at DESC LIMIT 600"):
+            tbl = TARGET_TABLES[r["target_type"]]
+            owner_row = conn.execute(
+                (f"SELECT project_id, title AS t FROM {tbl} WHERE id=?"
+                 if r["target_type"] != "entity"
+                 else f"SELECT project_id, name AS t FROM {tbl} WHERE id=?"),
+                (r["target_id"],)).fetchone()
+            if owner_row is None or owner_row["project_id"] != project_id:
+                continue
+            out.append({"at": r["created_at"], "kind": "revision", "who": r["created_by"],
+                        "what": f"{owner_row['t']} → rev {r['rev']}", "detail": r["note"]})
+        for f in conn.execute(
+                "SELECT * FROM findings WHERE project_id=? AND status != 'open' "
+                "AND updated_at IS NOT NULL", (project_id,)):
+            out.append({"at": f["updated_at"], "kind": f"finding {f['status']}",
+                        "who": f["updated_by"] or "",
+                        "what": f"{f['severity']} · {f['category']}",
+                        "detail": (f["status_note"] or "") + " — was: "
+                                  + f["evidence_quote"][:80]})
+        for c in conn.execute("SELECT * FROM comments WHERE status='resolved' "
+                              "AND resolved_at IS NOT NULL"):
+            tbl = TARGET_TABLES.get(c["target_type"])
+            if tbl is None:
+                continue
+            owner_row = conn.execute(f"SELECT project_id FROM {tbl} WHERE id=?",
+                                     (c["target_id"],)).fetchone()
+            if owner_row is None or owner_row["project_id"] != project_id:
+                continue
+            out.append({"at": c["resolved_at"], "kind": "note resolved",
+                        "who": c["resolved_by"] or "",
+                        "what": f"margin note by {c['created_by']}",
+                        "detail": c["body"][:140]})
+        for d in conn.execute("SELECT * FROM decisions WHERE project_id=?", (project_id,)):
+            out.append({"at": d["created_at"], "kind": "decision", "who": d["decided_by"],
+                        "what": d["subject_type"], "detail": d["ruling"][:180]})
+        for v in conn.execute(
+                "SELECT v.*, e.name AS claim_name, e.project_id AS pid FROM verifications v "
+                "JOIN entities e ON e.id = v.claim_id"):
+            if v["pid"] != project_id:
+                continue
+            out.append({"at": v["created_at"], "kind": f"fact {v['verdict']}",
+                        "who": v["created_by"], "what": v["claim_name"][:80],
+                        "detail": (v["notes"] or "")[:140]})
+    out.sort(key=lambda e: e["at"], reverse=True)
+    return out[:limit]
+
+
+@mcp.tool()
 def project_dashboard_get(project_id: str) -> dict:
     """The room's dashboard, in spec §15.3 priority order: what changed, what's working
     (protect), blocking/major findings, decisions awaiting the owner, reviews waiting,
