@@ -2598,6 +2598,15 @@ def build_app():
         key = headers.get("x-api-key", "")
         if not key and headers.get("authorization", "").lower().startswith("bearer "):
             key = headers["authorization"][7:]
+        if not key:
+            # Clients whose connector UIs can't set headers (ChatGPT custom connectors)
+            # may carry the key in the URL: /mcp?key=... Access logging is disabled in
+            # __main__ so credentials never land in server logs (spec §18).
+            qs = scope.get("query_string", b"").decode()
+            for pair in qs.split("&"):
+                if pair.startswith("key="):
+                    key = pair[4:]
+                    break
         ident = keys.get(key)
         if ident is None:
             await send({"type": "http.response.start", "status": 401,
@@ -2672,4 +2681,6 @@ if __name__ == "__main__":
             print(f"[story-bible] boot backup failed: {e}", file=sys.stderr)
         threading.Thread(target=_backup_loop, daemon=True, name="backup-loop").start()
     print(f"[story-bible] db={DB_PATH} port={PORT} keys={len(_load_keys())}")
-    uvicorn.run(build_app(), host="0.0.0.0", port=PORT)
+    # access_log off: URLs may carry API keys for header-less clients (spec §18 —
+    # credentials never in logs)
+    uvicorn.run(build_app(), host="0.0.0.0", port=PORT, access_log=False)
