@@ -1842,6 +1842,30 @@ def analysis_run_complete(run_id: str, verdict: str, observed_summary: str,
 
 
 @mcp.tool()
+def annotations_get(target_type: str, target_id: str) -> dict:
+    """Inline-annotation data for a reading view: live findings (open/accepted/
+    deferred) and strengths-to-protect on this chapter/scene, each carrying its
+    verbatim evidence quote so prose can be highlighted in place. Resolved and
+    incorrect findings drop out automatically. Any role."""
+    with _db() as conn:
+        _get_target(conn, target_type, target_id)
+        finds = _rows(conn.execute(
+            "SELECT id, severity, category, evidence_quote, explanation, "
+            "smallest_intervention, status, target_rev FROM findings "
+            "WHERE target_type=? AND target_id=? AND status IN ('open','accepted','deferred') "
+            "ORDER BY created_at", (target_type, target_id)))
+        strengths, seen = [], set()
+        for r in conn.execute(
+                "SELECT evidence_quote, explanation, target_rev FROM strengths "
+                "WHERE target_type=? AND target_id=? ORDER BY created_at DESC",
+                (target_type, target_id)):
+            if r["evidence_quote"] not in seen:
+                seen.add(r["evidence_quote"])
+                strengths.append(dict(r))
+        return {"findings": finds, "strengths": strengths}
+
+
+@mcp.tool()
 def finding_list(project_id: str, status: str = "open",
                  target_id: str | None = None) -> list[dict]:
     """List findings (status: open | accepted | resolved | intentional | deferred |

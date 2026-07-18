@@ -100,6 +100,16 @@ h2.viewtitle{font-family:var(--display);font-weight:400;font-size:1.7rem;margin-
 .notecard .anch{font-family:var(--mono);font-size:.7rem;color:var(--faint);font-style:italic;margin:.2rem 0}
 .notecard .nbody{font-size:.92rem;color:var(--dim);line-height:1.55}
 
+/* ---------- editorial ink ---------- */
+u.ann{text-decoration:none;border-bottom:2px solid;padding-bottom:1px;cursor:help}
+.ann-strong{border-color:#8fae72;background:rgba(143,174,114,.10)}
+.ann-weak{border-color:#d05b3a;background:rgba(208,91,58,.11)}
+.ann-mid{border-color:#c9a35a;background:rgba(201,163,90,.10)}
+.inklegend{display:flex;gap:1.1rem;justify-content:center;font-family:var(--mono);
+  font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:.6rem 0 1.4rem}
+.inklegend span{border-bottom:2px solid;padding-bottom:1px}
+.inklegend .lg{border-color:#8fae72}.inklegend .lr{border-color:#d05b3a}.inklegend .ly{border-color:#c9a35a}
+
 /* ---------- reading ---------- */
 .prose{font-size:1.06rem;line-height:1.85;color:var(--text)}
 .prose p{margin:0 0 1.1em;text-align:justify;hyphens:auto}
@@ -185,6 +195,35 @@ textarea.edit{min-height:14rem;resize:vertical}
 "use strict";
 let KEY = localStorage.getItem("sb_key") || "";
 let PROJECT = null, PROJECTS = [], VIEW = {name:"desk"}, KINDCOUNTS = {};
+let INK = localStorage.getItem("sb_ink") !== "off";
+
+function inkMark(text, anns){
+  let items = [];
+  (anns.strengths||[]).forEach(s=>items.push({q:s.evidence_quote, cls:"ann-strong",
+    tip:"PROTECT · "+s.explanation}));
+  (anns.findings||[]).forEach(f=>items.push({q:f.evidence_quote,
+    cls:(f.severity==="blocking"||f.severity==="major")?"ann-weak":"ann-mid",
+    tip:f.severity.toUpperCase()+" · "+f.category+" · "+f.explanation
+        +(f.smallest_intervention?" — FIX: "+f.smallest_intervention:"")}));
+  items = items.filter(it=>it.q && !it.q.includes("\n\n"));
+  items.sort((a,b)=>b.q.length-a.q.length);
+  const marks = [];
+  for(const it of items){
+    const idx = text.indexOf(it.q);
+    if(idx < 0) continue;
+    const n = marks.length;
+    text = text.slice(0,idx)+`⟦S${n}⟧`+it.q+`⟦E${n}⟧`+text.slice(idx+it.q.length);
+    marks.push(it);
+  }
+  return {text, marks};
+}
+function inkApply(html, marks){
+  marks.forEach((it,n)=>{
+    html = html.split(`⟦S${n}⟧`).join(`<u class="ann ${it.cls}" title="${esc(it.tip)}">`)
+               .split(`⟦E${n}⟧`).join("</u>");
+  });
+  return html.replace(/⟦[SE]\d+⟧/g,"");
+}
 
 async function api(name, args){
   const r = await fetch("/mcp", {method:"POST",
@@ -412,21 +451,30 @@ async function vManuscript(){
 async function vChapter(id){
   const ch = await api("chapter_get",{chapter_id:id});
   let h=`<div class="crumb"><a onclick="go('manuscript')">Manuscript</a> / ${esc(ch.title)}
-         <span class="chip ${ch.status}" style="margin-left:.8rem">${ch.status}</span></div>`;
+         <span class="chip ${ch.status}" style="margin-left:.8rem">${ch.status}</span>
+         <button class="btn2" style="margin-left:1rem" onclick="INK=!INK;localStorage.setItem('sb_ink',INK?'on':'off');render()">${INK?"ink on":"ink off"}</button></div>`;
   h+=`<div class="chaptertitle">${esc(ch.title)}</div>
       <div class="statlbl" style="text-align:center;margin-bottom:0">rev ${ch.rev} · updated ${when(ch.updated_at)} · ${esc(ch.status)}</div>
       <div class="chapterrule"></div>`;
+  if(INK) h+=`<div class="inklegend"><span class="lg">strong</span><span class="ly">mediocre</span><span class="lr">weak</span> <span style="border:none">· hover for why</span></div>`;
+  function inked(text, anns){
+    if(!INK || !anns) return md(text);
+    const {text:marked, marks} = inkMark(text, anns);
+    return inkApply(md(marked), marks);
+  }
   if(ch.scenes && ch.scenes.length){
     const scenes = await Promise.all(ch.scenes.map(s=>api("scene_get",{scene_id:s.id})));
-    for(const s of scenes){
+    const sanns = INK ? await Promise.all(scenes.map(s=>api("annotations_get",{target_type:"scene",target_id:s.id}).catch(()=>null))) : [];
+    scenes.forEach((s,i)=>{
       h+=`<div class="scenehead"><span class="st">${esc(s.title)||"scene"}</span>
           <span class="chip ${s.status}">${s.status}</span></div>`;
       if(s.synopsis) h+=`<div class="lede">${esc(s.synopsis)}</div>`;
-      h+=`<div class="prose">${md(s.content_md)}</div>`;
-      if(s!==scenes[scenes.length-1]) h+="<div class='asterism'>⁂</div>";
-    }
+      h+=`<div class="prose">${inked(s.content_md, sanns[i])}</div>`;
+      if(i<scenes.length-1) h+="<div class='asterism'>⁂</div>";
+    });
   } else {
-    h+=`<div class="prose">${md(ch.content_md)}</div>`;
+    const anns = INK ? await api("annotations_get",{target_type:"chapter",target_id:id}).catch(()=>null) : null;
+    h+=`<div class="prose">${inked(ch.content_md, anns)}</div>`;
   }
   const notes = await api("comment_list",{target_type:"chapter",target_id:id,status:"open"});
   if(notes.length){
