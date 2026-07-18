@@ -206,6 +206,76 @@ CREATE TABLE IF NOT EXISTS rebuttals (
 );
 CREATE INDEX IF NOT EXISTS idx_rebuttals_target ON rebuttals(target_kind, target_id);
 
+-- Editorial analysis runs (spec §9/§10): one formal Sol review job + its result.
+-- Immutable once complete; staleness is computed against current target revs.
+CREATE TABLE IF NOT EXISTS analysis_runs (
+    id               TEXT PRIMARY KEY,
+    project_id       TEXT NOT NULL,
+    analysis_type    TEXT NOT NULL,     -- scene_check | chapter_gate | part_audit |
+                                        -- global_arc_audit | fact_check | second_opinion | cold_read
+    target_type      TEXT NOT NULL,
+    target_id        TEXT NOT NULL,
+    target_rev       INTEGER NOT NULL,  -- pinned at creation
+    pinned_json      TEXT DEFAULT '{}', -- profile/rubric revisions pinned for calibration
+    status           TEXT NOT NULL DEFAULT 'queued',  -- queued | running | complete | cancelled
+    model            TEXT NOT NULL DEFAULT 'gpt-5.6-sol',
+    reasoning_effort TEXT NOT NULL DEFAULT 'max',
+    advisory         INTEGER NOT NULL DEFAULT 0,      -- 1 for second_opinion / cold_read
+    verdict          TEXT DEFAULT '',
+    intent_summary   TEXT DEFAULT '',
+    observed_summary TEXT DEFAULT '',
+    scores_json      TEXT DEFAULT '{}',
+    limitations_json TEXT DEFAULT '[]',
+    requested_by     TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    completed_by     TEXT,
+    completed_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON analysis_runs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_runs_target ON analysis_runs(target_type, target_id);
+
+-- Findings (spec §10.4): evidence-anchored problems. Evidence is validated
+-- server-side against the pinned revision content before acceptance.
+CREATE TABLE IF NOT EXISTS findings (
+    id                     TEXT PRIMARY KEY,
+    run_id                 TEXT NOT NULL REFERENCES analysis_runs(id),
+    project_id             TEXT NOT NULL,
+    target_type            TEXT NOT NULL,
+    target_id              TEXT NOT NULL,
+    target_rev             INTEGER NOT NULL,
+    severity               TEXT NOT NULL,   -- blocking | major | minor | watch
+    category               TEXT DEFAULT '',
+    confidence             REAL DEFAULT 0,
+    evidence_quote         TEXT NOT NULL,
+    location               TEXT DEFAULT '',
+    explanation            TEXT NOT NULL,
+    affected_entity_ids    TEXT DEFAULT '[]',
+    smallest_intervention  TEXT DEFAULT '',
+    status                 TEXT NOT NULL DEFAULT 'open',
+                          -- open | accepted | resolved | intentional | deferred | incorrect
+    status_note            TEXT DEFAULT '',
+    created_at             TEXT NOT NULL,
+    updated_by             TEXT,
+    updated_at             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_findings_target ON findings(target_type, target_id, status);
+CREATE INDEX IF NOT EXISTS idx_findings_project ON findings(project_id, status);
+
+-- Strengths to protect (spec §10.5): evidence-anchored passages revisions must not flatten.
+CREATE TABLE IF NOT EXISTS strengths (
+    id             TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL REFERENCES analysis_runs(id),
+    project_id     TEXT NOT NULL,
+    target_type    TEXT NOT NULL,
+    target_id      TEXT NOT NULL,
+    target_rev     INTEGER NOT NULL,
+    evidence_quote TEXT NOT NULL,
+    location       TEXT DEFAULT '',
+    explanation    TEXT NOT NULL,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strengths_target ON strengths(target_type, target_id);
+
 -- Mention index: where each entity's name/aliases appear in prose. Maintained
 -- automatically on content writes; rebuildable via the mentions_rebuild tool.
 CREATE TABLE IF NOT EXISTS mentions (

@@ -123,6 +123,19 @@ h2.viewtitle{font-family:var(--display);font-weight:400;font-size:1.7rem;margin-
 .bar .bf{position:absolute;inset:0 auto 0 0;background:linear-gradient(90deg,var(--brass-dim),var(--brass))}
 .bar .bn{font-family:var(--mono);font-size:.68rem;color:var(--dim);width:4.5rem;text-align:right;flex:none}
 .loading{color:var(--faint);font-family:var(--mono);font-size:.75rem;letter-spacing:.2em;text-transform:uppercase;padding:3rem 0;text-align:center}
+
+/* ---------- canon editing ---------- */
+.editbar{display:flex;gap:.6rem;margin:1.2rem 0}
+.btn2{background:none;border:1px solid var(--line);color:var(--dim);font-family:var(--mono);
+  font-size:.66rem;padding:.35rem .8rem;letter-spacing:.14em;text-transform:uppercase;cursor:pointer}
+.btn2:hover{border-color:var(--brass-dim);color:var(--text)}
+.btn2.primary{background:var(--brass);border-color:var(--brass);color:#181307}
+.btn2.primary:hover{background:#e0b566}
+input.edit,textarea.edit{width:100%;background:var(--panel2);border:1px solid var(--line);
+  color:var(--text);font-family:var(--serif);font-size:1rem;line-height:1.6;padding:.8rem;margin:.35rem 0}
+input.edit:focus,textarea.edit:focus{outline:none;border-color:var(--brass-dim)}
+textarea.edit{min-height:14rem;resize:vertical}
+.editerr{color:var(--seal);font-size:.85rem;margin:.6rem 0;white-space:pre-wrap}
 </style>
 </head>
 <body>
@@ -303,11 +316,32 @@ async function vChapter(id){
 async function vKind(kind){
   const ents = await api("entity_list",{project_id:PROJECT.id, kind});
   let h=`<h2 class="viewtitle">${kind.charAt(0).toUpperCase()+kind.slice(1)}s</h2>`;
+  h+=`<div class="editbar"><button class="btn2" onclick="newEntity('${kind}')">+ New ${esc(kind)}</button></div><div id="editzone"></div>`;
   if(!ents.length){main(h+"<div class='empty'>None yet.</div>");return}
   h+="<div class='cardgrid'>";
   for(const e of ents) h+=`<div class="card" onclick="VIEW={name:'entity',id:'${e.id}',back:'kind:${kind}'};render()">
     <div class="t">${esc(e.name)}</div><div class="s">${esc(e.summary)||"&nbsp;"}</div></div>`;
   main(h+"</div>");
+}
+
+function newEntity(kind){
+  document.getElementById("editzone").innerHTML = `
+    <input class="edit" id="n_name" placeholder="name">
+    <input class="edit" id="n_sum" placeholder="summary (one line)">
+    <textarea class="edit" id="n_body" placeholder="content (markdown)"></textarea>
+    <div class="editbar"><button class="btn2 primary" onclick="createEntity('${kind}')">Create</button>
+    <button class="btn2" onclick="render()">Cancel</button></div><div class="editerr" id="n_err"></div>`;
+  document.getElementById("n_name").focus();
+}
+async function createEntity(kind){
+  try{
+    const name = document.getElementById("n_name").value.trim();
+    if(!name){document.getElementById("n_err").textContent="It needs a name.";return}
+    await api("entity_create",{project_id:PROJECT.id, kind, name,
+      summary:document.getElementById("n_sum").value,
+      content_md:document.getElementById("n_body").value});
+    await refresh();
+  }catch(err){document.getElementById("n_err").textContent = err.message}
 }
 
 async function vEntity(id){
@@ -327,7 +361,27 @@ async function vEntity(id){
     for(const a of apps) h+=`<div class="row" ${a.target_type!=="entity"?`onclick="openApp('${a.target_type}','${a.target_id}')"`:""}>
       <span class="no">${a.count}×</span><span class="t" style="font-size:.95rem">${esc(a.title||a.target_id)}</span>
       <span class="m">${a.target_type}</span></div>`;}
+  h+=`<div class="editbar"><button class="btn2" onclick="editEntity('${id}')">Edit</button></div><div id="editzone"></div>`;
   main(h);
+}
+
+async function editEntity(id){
+  const e = await api("entity_get",{entity_id:id});
+  document.getElementById("editzone").innerHTML = `
+    <div class="blockhead">Editing — every save is a new attributed revision; locked records will refuse</div>
+    <input class="edit" id="e_sum" placeholder="summary" value="${esc(e.summary||"")}">
+    <textarea class="edit" id="e_body">${esc(e.content_md||"")}</textarea>
+    <div class="editbar"><button class="btn2 primary" onclick="saveEntity('${id}')">Save revision</button>
+    <button class="btn2" onclick="render()">Cancel</button></div><div class="editerr" id="e_err"></div>`;
+}
+async function saveEntity(id){
+  try{
+    await api("entity_update",{entity_id:id,
+      summary:document.getElementById("e_sum").value,
+      content_md:document.getElementById("e_body").value,
+      revision_note:"edited in the web room"});
+    render();
+  }catch(err){document.getElementById("e_err").textContent = err.message}
 }
 async function openApp(tt,id){
   if(tt==="chapter"){VIEW={name:"chapter",id};render()}

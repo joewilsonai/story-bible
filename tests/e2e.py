@@ -296,6 +296,60 @@ async def main():
             print("GOVERNANCE OK: owner role, locks+events, silhouette gate, lint gate, "
                   "override decisions, seam, claims+verification, rebuttals, parts")
 
+    # --- Sol editorial engine: runs, packets, evidence validation, findings lifecycle
+    async with (await as_key("k-luna")) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            run = await call(s, "analysis_run_create", analysis_type="chapter_gate",
+                             target_type="chapter", target_id=cid)
+            assert run["status"] == "queued" and run["target_rev"] >= 1, run
+            packet = await call(s, "review_packet_get", run_id=run["id"])
+            assert packet["target_prose"] and "output_schema" in packet, list(packet)
+            done = await call(s, "analysis_run_complete", run_id=run["id"],
+                              verdict="revise", observed_summary="test observation",
+                              intent_summary="test intent",
+                              scores={"story_movement": 80, "voice_authenticity": 90},
+                              findings=[
+                                  {"severity": "major", "category": "pacing",
+                                   "confidence": 0.9, "evidence_quote": "x",
+                                   "explanation": "test finding",
+                                   "smallest_intervention": "test fix"},
+                                  {"severity": "major", "category": "fake",
+                                   "confidence": 0.9, "evidence_quote": "NOT IN THE TEXT",
+                                   "explanation": "must be rejected"}],
+                              strengths=[{"evidence_quote": "x",
+                                          "explanation": "protect this"}])
+            assert done["findings_accepted"] == 1 and done["strengths_accepted"] == 1, done
+            assert len(done["rejected"]) == 1, done
+            got = await call(s, "analysis_run_get", run_id=run["id"])
+            assert got["status"] == "complete" and got["scores"]["story_movement"] == 80, got
+            open_f = await call(s, "finding_list", project_id=pid)
+            mine = [f for f in open_f if f["run_id"] == run["id"]]
+            assert mine and mine[0]["stale"] is False, mine
+            fid = mine[0]["id"]
+            not_owner3 = await call(s, "finding_update_status", finding_id=fid,
+                                    status="intentional")
+            assert "_error" in not_owner3 and "owner" in not_owner3["_error"], not_owner3
+            frb = await call(s, "rebuttal_create", target_kind="finding", target_id=fid,
+                             body="dissent on this finding", evidence_quote="x")
+            assert frb["target_kind"] == "finding", frb
+            # target moves -> finding + run go stale
+            await call(s, "chapter_update", chapter_id=cid, content_md="moved on again")
+            stale_f = await call(s, "finding_list", project_id=pid)
+            assert [f for f in stale_f if f["id"] == fid][0]["stale"] is True, stale_f
+            res = await call(s, "finding_update_status", finding_id=fid, status="resolved",
+                             note="fixed in next rev")
+            assert res["status"] == "resolved", res
+            gh = await call(s, "grade_history", target_type="chapter", target_id=cid)
+            assert gh and gh[0]["scores"]["voice_authenticity"] == 90, gh
+            debt = await call(s, "narrative_debt_list", project_id=pid)
+            assert "open_threads" in debt and "stale_analyses" in debt, list(debt)
+            dash = await call(s, "project_dashboard_get", project_id=pid)
+            assert dash["what_changed"] and "awaiting_owner" in dash, list(dash)
+            assert any(p2["evidence_quote"] == "x" for p2 in dash["protect"]), dash
+            print("SOL ENGINE OK: run/packet/evidence-validation/findings/staleness/"
+                  "rebuttal/grades/debt/dashboard")
+
     # --- backups: author snapshots + pulls, editor blocked from both
     async with (await as_key("k-luna")) as (r, w, _):
         async with ClientSession(r, w) as s:

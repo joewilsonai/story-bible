@@ -77,6 +77,12 @@ VERDICTS = {"verified", "false", "disputed", "unverifiable", "outdated"}
 CLAIM_DOMAINS = {"technical", "scientific", "political", "historical", "geographic",
                  "medical", "legal", "economic", "cultural", "other"}
 CLAIM_CLASSES = {"fact", "inference", "projection", "deliberate_fiction"}
+ANALYSIS_TYPES = {"scene_check", "chapter_gate", "part_audit", "global_arc_audit",
+                  "fact_check", "second_opinion", "cold_read"}
+ADVISORY_TYPES = {"second_opinion", "cold_read"}
+SEVERITIES = {"blocking", "major", "minor", "watch"}
+FINDING_STATUSES = {"open", "accepted", "resolved", "intentional", "deferred", "incorrect"}
+OWNER_FINDING_STATUSES = {"intentional", "incorrect"}
 
 # caller identity for the current request: {"name": ..., "role": "author"|"editor"}
 CALLER: contextvars.ContextVar[dict] = contextvars.ContextVar("caller")
@@ -1539,6 +1545,9 @@ def rebuttal_create(target_kind: str, target_id: str, body: str,
         if target_kind == "proposal" and conn.execute(
                 "SELECT 1 FROM proposals WHERE id=?", (target_id,)).fetchone() is None:
             raise ValueError(f"proposal {target_id} not found")
+        if target_kind == "finding" and conn.execute(
+                "SELECT 1 FROM findings WHERE id=?", (target_id,)).fetchone() is None:
+            raise ValueError(f"finding {target_id} not found")
         rid = _id()
         conn.execute(
             "INSERT INTO rebuttals (id, target_kind, target_id, body, evidence_quote, location, "
@@ -1555,6 +1564,446 @@ def rebuttal_list(target_kind: str, target_id: str) -> list[dict]:
         return _rows(conn.execute(
             "SELECT * FROM rebuttals WHERE target_kind=? AND target_id=? ORDER BY created_at",
             (target_kind, target_id)))
+
+
+# ---------------------------------------------------------------- editorial engine (Sol)
+
+SOL_OUTPUT_SCHEMA = {
+    "analysis_type": "chapter_gate | scene_check | ...",
+    "target_id": "id", "target_revision": 0,
+    "model": "gpt-5.6-sol", "reasoning_effort": "max",
+    "verdict": "pass | revise",
+    "intent": {"source": "accepted | inferred", "summary": "..."},
+    "observed": {"summary": "..."},
+    "strengths_to_protect": [{"evidence_quote": "EXACT quotation", "location": "…",
+                              "explanation": "why protect"}],
+    "scores": {"dimension_name": 0},
+    "findings": [{"severity": "blocking | major | minor | watch", "category": "…",
+                  "confidence": 0.0, "evidence_quote": "EXACT quotation", "location": "…",
+                  "explanation": "why this is a story problem",
+                  "affected_entity_ids": [], "smallest_intervention": "…"}],
+    "limitations": [],
+}
+
+
+def _rev_content(conn, target_type: str, target_id: str, rev: int) -> str:
+    r = conn.execute(
+        "SELECT content_md FROM revisions WHERE target_type=? AND target_id=? AND rev=?",
+        (target_type, target_id, rev)).fetchone()
+    return r["content_md"] if r is not None else ""
+
+
+def _run_project(conn, target_type: str, target_id: str) -> str:
+    row = conn.execute(f"SELECT project_id FROM {TARGET_TABLES[target_type]} WHERE id=?",
+                       (target_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"{target_type} {target_id} not found")
+    return row["project_id"]
+
+
+@mcp.tool()
+def analysis_run_create(analysis_type: str, target_type: str, target_id: str,
+                        model: str = "gpt-5.6-sol", reasoning_effort: str = "max") -> dict:
+    """Queue a formal editorial analysis (spec §10). Pins the target revision and the
+    applicable profile revisions for calibration. A runner picks up queued jobs,
+    assembles the packet via review_packet_get, runs the model, and posts results via
+    analysis_run_complete. second_opinion and cold_read are owner-triggered pull-cords
+    and always advisory. Any role may request standard reviews."""
+    if analysis_type not in ANALYSIS_TYPES:
+        raise ValueError(f"analysis_type must be one of {sorted(ANALYSIS_TYPES)}")
+    if analysis_type in ADVISORY_TYPES:
+        _require_owner()
+    with _db() as conn:
+        target = _get_target(conn, target_type, target_id)
+        project_id = target["project_id"]
+        pinned = {}
+        for mt_type, mt_id, key in (
+                (target_type, target_id, "voice_profile_id"),
+                (target_type, target_id, "rubric_profile_id")):
+            m = conn.execute(
+                "SELECT value FROM node_meta WHERE target_type=? AND target_id=? AND key=?",
+                (mt_type, mt_id, key)).fetchone()
+            if m is not None:
+                prof = conn.execute("SELECT rev FROM entities WHERE id=?",
+                                    (m["value"],)).fetchone()
+                if prof is not None:
+                    pinned[key] = {"id": m["value"], "rev": prof["rev"]}
+        rid = _id()
+        conn.execute(
+            "INSERT INTO analysis_runs (id, project_id, analysis_type, target_type, target_id, "
+            "target_rev, pinned_json, status, model, reasoning_effort, advisory, requested_by, "
+            "created_at) VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+            (rid, project_id, analysis_type, target_type, target_id, target["rev"],
+             json.dumps(pinned), model, reasoning_effort,
+             int(analysis_type in ADVISORY_TYPES), _caller()["name"], _now()))
+        return _row(conn.execute("SELECT * FROM analysis_runs WHERE id=?", (rid,)).fetchone())
+
+
+@mcp.tool()
+def analysis_run_list(project_id: str | None = None, status: str | None = None) -> list[dict]:
+    """List analysis runs (newest first), optionally by project and/or status
+    (queued | running | complete | cancelled). Each includes a computed 'stale' flag —
+    true when the target has moved past the pinned revision."""
+    with _db() as conn:
+        q = "SELECT * FROM analysis_runs WHERE 1=1"
+        args: list = []
+        if project_id is not None:
+            q += " AND project_id=?"
+            args.append(project_id)
+        if status is not None:
+            q += " AND status=?"
+            args.append(status)
+        out = _rows(conn.execute(q + " ORDER BY created_at DESC LIMIT 100", args))
+        for r in out:
+            cur = conn.execute(
+                f"SELECT rev FROM {TARGET_TABLES[r['target_type']]} WHERE id=?",
+                (r["target_id"],)).fetchone()
+            r["stale"] = bool(cur) and cur["rev"] > r["target_rev"]
+        return out
+
+
+@mcp.tool()
+def analysis_run_get(run_id: str) -> dict:
+    """Get an analysis run with its findings and strengths, scores parsed, staleness computed."""
+    with _db() as conn:
+        r = _row(conn.execute("SELECT * FROM analysis_runs WHERE id=?", (run_id,)).fetchone())
+        if r is None:
+            raise ValueError(f"analysis run {run_id} not found")
+        r["scores"] = json.loads(r.pop("scores_json") or "{}")
+        r["limitations"] = json.loads(r.pop("limitations_json") or "[]")
+        r["pinned"] = json.loads(r.pop("pinned_json") or "{}")
+        cur = conn.execute(f"SELECT rev FROM {TARGET_TABLES[r['target_type']]} WHERE id=?",
+                           (r["target_id"],)).fetchone()
+        r["stale"] = bool(cur) and cur["rev"] > r["target_rev"]
+        r["findings"] = _rows(conn.execute(
+            "SELECT * FROM findings WHERE run_id=? ORDER BY created_at", (run_id,)))
+        r["strengths"] = _rows(conn.execute(
+            "SELECT * FROM strengths WHERE run_id=? ORDER BY created_at", (run_id,)))
+        return r
+
+
+@mcp.tool()
+def analysis_run_cancel(run_id: str) -> dict:
+    """Cancel a queued or running analysis. Any role."""
+    with _db() as conn:
+        r = conn.execute("SELECT status FROM analysis_runs WHERE id=?", (run_id,)).fetchone()
+        if r is None:
+            raise ValueError(f"analysis run {run_id} not found")
+        if r["status"] not in ("queued", "running"):
+            raise ValueError(f"run is already {r['status']}")
+        conn.execute("UPDATE analysis_runs SET status='cancelled' WHERE id=?", (run_id,))
+        return {"run_id": run_id, "status": "cancelled"}
+
+
+@mcp.tool()
+def review_packet_get(run_id: str) -> dict:
+    """Assemble the deterministic review packet for a queued/running run (spec §16.3):
+    pinned-revision prose, declared metadata and profiles, entities on stage, prior-story
+    memory, linked claims with verification state, open findings and intentional
+    exceptions on the target, the seam, and the required structured-output schema.
+    Marks the run 'running'. Any role (this is what the Sol runner calls)."""
+    with _db() as conn:
+        run = _row(conn.execute("SELECT * FROM analysis_runs WHERE id=?", (run_id,)).fetchone())
+        if run is None:
+            raise ValueError(f"analysis run {run_id} not found")
+        if run["status"] == "cancelled":
+            raise ValueError("run is cancelled")
+        conn.execute("UPDATE analysis_runs SET status='running' WHERE id=?", (run_id,))
+        tt, tid = run["target_type"], run["target_id"]
+        packet: dict = {"run": {k: run[k] for k in ("id", "analysis_type", "target_type",
+                                                    "target_id", "target_rev", "model",
+                                                    "reasoning_effort", "advisory")}}
+        packet["target_prose"] = _rev_content(conn, tt, tid, run["target_rev"])
+        packet["target_meta"] = {r["key"]: r["value"] for r in conn.execute(
+            "SELECT key, value FROM node_meta WHERE target_type=? AND target_id=?", (tt, tid))}
+        pinned = json.loads(run["pinned_json"] or "{}")
+        packet["profiles"] = {}
+        for key, ref in pinned.items():
+            prof = conn.execute("SELECT name, summary, content_md FROM entities WHERE id=?",
+                                (ref["id"],)).fetchone()
+            if prof is not None:
+                packet["profiles"][key] = dict(prof)
+        # claims linked to the target, with latest verdicts
+        claims = []
+        for l in conn.execute("SELECT from_id, to_id, rel_type FROM links "
+                              "WHERE (from_id=? OR to_id=?) AND rel_type='asserts'", (tid, tid)):
+            cid = l["to_id"] if l["from_id"] == tid else l["from_id"]
+            ent = conn.execute("SELECT name, content_md FROM entities WHERE id=?",
+                               (cid,)).fetchone()
+            if ent is None:
+                continue
+            v = conn.execute("SELECT verdict, confidence FROM verifications WHERE claim_id=? "
+                             "ORDER BY created_at DESC LIMIT 1", (cid,)).fetchone()
+            claims.append({"id": cid, "claim": ent["content_md"] or ent["name"],
+                           "verdict": v["verdict"] if v else "unchecked"})
+        packet["claims"] = claims
+        packet["open_findings"] = _rows(conn.execute(
+            "SELECT severity, category, evidence_quote, explanation, status FROM findings "
+            "WHERE target_type=? AND target_id=? AND status IN ('open','accepted','deferred')",
+            (tt, tid)))
+        packet["intentional_exceptions"] = _rows(conn.execute(
+            "SELECT severity, category, evidence_quote, explanation, status_note FROM findings "
+            "WHERE target_type=? AND target_id=? AND status='intentional'", (tt, tid)))
+        packet["seam"] = seam_get(run["project_id"]) if run["advisory"] == 0 else {}
+        packet["output_schema"] = SOL_OUTPUT_SCHEMA
+    # context bundle opens its own connection — call outside the write transaction
+    if run["advisory"] == 0 or run["analysis_type"] == "second_opinion":
+        try:
+            packet["context"] = (context_bundle(scene_id=tid) if tt == "scene"
+                                 else context_bundle(chapter_id=tid) if tt == "chapter"
+                                 else {})
+        except ValueError:
+            packet["context"] = {}
+        if run["analysis_type"] == "second_opinion":
+            # spec decision #3: outside models never see private/silhouette canon
+            ctx = packet.get("context") or {}
+            ctx["entities_on_stage"] = [
+                e for e in ctx.get("entities_on_stage", [])
+                if not str(e.get("content_md", "")).startswith("[withheld")]
+            with _db() as conn2:
+                hidden = {r["id"] for r in conn2.execute(
+                    "SELECT id FROM entities WHERE project_id=? AND visibility IN "
+                    "('private','silhouette')", (run["project_id"],))}
+            ctx["entities_on_stage"] = [e for e in ctx.get("entities_on_stage", [])
+                                        if e.get("id") not in hidden]
+            packet["context"] = ctx
+    else:
+        packet["context"] = {}  # cold_read: zero context by definition
+    return packet
+
+
+@mcp.tool()
+def analysis_run_complete(run_id: str, verdict: str, observed_summary: str,
+                          intent_summary: str = "", scores: dict | None = None,
+                          findings: list[dict] | None = None,
+                          strengths: list[dict] | None = None,
+                          limitations: list | None = None) -> dict:
+    """Post a completed analysis. EVERY finding and strength must quote the pinned
+    revision EXACTLY — evidence that does not appear verbatim in that revision's
+    content is rejected (spec §9.6) and reported back. Valid findings open in the
+    review queue. Any role (attributed)."""
+    findings = findings or []
+    strengths = strengths or []
+    with _db() as conn:
+        run = _row(conn.execute("SELECT * FROM analysis_runs WHERE id=?", (run_id,)).fetchone())
+        if run is None:
+            raise ValueError(f"analysis run {run_id} not found")
+        if run["status"] not in ("queued", "running"):
+            raise ValueError(f"run is already {run['status']}")
+        content = _rev_content(conn, run["target_type"], run["target_id"], run["target_rev"])
+        accepted_f, rejected = [], []
+        for f in findings:
+            quote = f.get("evidence_quote", "")
+            sev = f.get("severity", "")
+            if sev not in SEVERITIES:
+                rejected.append({"reason": f"bad severity {sev!r}", **f})
+                continue
+            if not quote or quote not in content:
+                rejected.append({"reason": "evidence_quote not found verbatim in pinned "
+                                           "revision", **f})
+                continue
+            fid = _id()
+            conn.execute(
+                "INSERT INTO findings (id, run_id, project_id, target_type, target_id, "
+                "target_rev, severity, category, confidence, evidence_quote, location, "
+                "explanation, affected_entity_ids, smallest_intervention, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (fid, run_id, run["project_id"], run["target_type"], run["target_id"],
+                 run["target_rev"], sev, f.get("category", ""), f.get("confidence", 0),
+                 quote, f.get("location", ""), f.get("explanation", ""),
+                 json.dumps(f.get("affected_entity_ids", [])),
+                 f.get("smallest_intervention", ""), _now()))
+            accepted_f.append(fid)
+        accepted_s = []
+        for s in strengths:
+            quote = s.get("evidence_quote", "")
+            if not quote or quote not in content:
+                rejected.append({"reason": "strength evidence_quote not found verbatim "
+                                           "in pinned revision", **s})
+                continue
+            sid = _id()
+            conn.execute(
+                "INSERT INTO strengths (id, run_id, project_id, target_type, target_id, "
+                "target_rev, evidence_quote, location, explanation, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (sid, run_id, run["project_id"], run["target_type"], run["target_id"],
+                 run["target_rev"], quote, s.get("location", ""),
+                 s.get("explanation", ""), _now()))
+            accepted_s.append(sid)
+        conn.execute(
+            "UPDATE analysis_runs SET status='complete', verdict=?, intent_summary=?, "
+            "observed_summary=?, scores_json=?, limitations_json=?, completed_by=?, "
+            "completed_at=? WHERE id=?",
+            (verdict, intent_summary, observed_summary, json.dumps(scores or {}),
+             json.dumps(limitations or []), _caller()["name"], _now(), run_id))
+        return {"run_id": run_id, "status": "complete",
+                "findings_accepted": len(accepted_f), "strengths_accepted": len(accepted_s),
+                "rejected": rejected}
+
+
+@mcp.tool()
+def finding_list(project_id: str, status: str = "open",
+                 target_id: str | None = None) -> list[dict]:
+    """List findings (status: open | accepted | resolved | intentional | deferred |
+    incorrect | all), each with a computed 'stale' flag when the target has moved past
+    the finding's revision."""
+    with _db() as conn:
+        q = "SELECT * FROM findings WHERE project_id=?"
+        args: list = [project_id]
+        if status != "all":
+            q += " AND status=?"
+            args.append(status)
+        if target_id is not None:
+            q += " AND target_id=?"
+            args.append(target_id)
+        out = _rows(conn.execute(q + " ORDER BY created_at DESC LIMIT 200", args))
+        for f in out:
+            cur = conn.execute(f"SELECT rev FROM {TARGET_TABLES[f['target_type']]} WHERE id=?",
+                               (f["target_id"],)).fetchone()
+            f["stale"] = bool(cur) and cur["rev"] > f["target_rev"]
+        return out
+
+
+@mcp.tool()
+def finding_update_status(finding_id: str, status: str, note: str = "") -> dict:
+    """Move a finding through the workflow. resolved/accepted/deferred need author or
+    owner; 'intentional' and 'incorrect' are rulings and need the OWNER (spec §3.13 —
+    editors dissent via rebuttal_create instead)."""
+    if status not in FINDING_STATUSES:
+        raise ValueError(f"status must be one of {sorted(FINDING_STATUSES)}")
+    if status in OWNER_FINDING_STATUSES:
+        _require_owner()
+    else:
+        _require_author()
+    with _db() as conn:
+        if conn.execute("SELECT 1 FROM findings WHERE id=?", (finding_id,)).fetchone() is None:
+            raise ValueError(f"finding {finding_id} not found")
+        conn.execute("UPDATE findings SET status=?, status_note=?, updated_by=?, updated_at=? "
+                     "WHERE id=?", (status, note, _caller()["name"], _now(), finding_id))
+        return _row(conn.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone())
+
+
+@mcp.tool()
+def grade_history(target_type: str, target_id: str) -> list[dict]:
+    """Score trajectory for a target across completed analysis runs, oldest first —
+    comparable because rubric/profile revisions are pinned per run (spec §9.7)."""
+    with _db() as conn:
+        _get_target(conn, target_type, target_id)
+        out = []
+        for r in conn.execute(
+                "SELECT id, analysis_type, target_rev, verdict, scores_json, model, "
+                "completed_at FROM analysis_runs WHERE target_type=? AND target_id=? "
+                "AND status='complete' ORDER BY completed_at",
+                (target_type, target_id)):
+            out.append({"run_id": r["id"], "analysis_type": r["analysis_type"],
+                        "target_rev": r["target_rev"], "verdict": r["verdict"],
+                        "model": r["model"], "completed_at": r["completed_at"],
+                        "scores": json.loads(r["scores_json"] or "{}")})
+        return out
+
+
+@mcp.tool()
+def narrative_debt_list(project_id: str) -> dict:
+    """The promises ledger (spec §12): open threads, unverified or false pre-seam
+    claims, open blocking/major findings, watch items, stale analyses, and aging
+    pending proposals. Computed live; intentional dormancy (thread status) respected."""
+    with _db() as conn:
+        debt: dict = {}
+        threads = []
+        for r in conn.execute("SELECT id, name, summary FROM entities WHERE project_id=? "
+                              "AND kind='thread' AND deleted=0", (project_id,)):
+            st = conn.execute("SELECT value FROM node_meta WHERE target_type='entity' "
+                              "AND target_id=? AND key='status'", (r["id"],)).fetchone()
+            status = st["value"] if st else "planted"
+            if status not in ("paid_off", "abandoned"):
+                threads.append({"name": r["name"], "status": status, "summary": r["summary"]})
+        debt["open_threads"] = threads
+        bad_claims = []
+        for r in conn.execute("SELECT id, name FROM entities WHERE project_id=? "
+                              "AND kind='research' AND deleted=0", (project_id,)):
+            v = conn.execute("SELECT verdict FROM verifications WHERE claim_id=? "
+                             "ORDER BY created_at DESC LIMIT 1", (r["id"],)).fetchone()
+            side = conn.execute("SELECT value FROM node_meta WHERE target_type='entity' "
+                                "AND target_id=? AND key='seam_side'", (r["id"],)).fetchone()
+            verdict = v["verdict"] if v else "unchecked"
+            if verdict in ("false", "outdated") or (
+                    verdict == "unchecked" and side is not None and side["value"] == "pre"):
+                bad_claims.append({"id": r["id"], "claim": r["name"], "verdict": verdict})
+        debt["claims_needing_attention"] = bad_claims
+        debt["open_blocking_major"] = _rows(conn.execute(
+            "SELECT id, severity, category, target_id, explanation FROM findings "
+            "WHERE project_id=? AND status='open' AND severity IN ('blocking','major') "
+            "ORDER BY severity", (project_id,)))
+        debt["watch_items"] = _rows(conn.execute(
+            "SELECT id, category, explanation FROM findings WHERE project_id=? "
+            "AND status='open' AND severity='watch'", (project_id,)))
+        stale_runs = 0
+        for r in conn.execute("SELECT target_type, target_id, target_rev FROM analysis_runs "
+                              "WHERE project_id=? AND status='complete'", (project_id,)):
+            cur = conn.execute(f"SELECT rev FROM {TARGET_TABLES[r['target_type']]} WHERE id=?",
+                               (r["target_id"],)).fetchone()
+            if cur is not None and cur["rev"] > r["target_rev"]:
+                stale_runs += 1
+        debt["stale_analyses"] = stale_runs
+        debt["pending_proposals"] = conn.execute(
+            "SELECT COUNT(*) n FROM proposals WHERE status='pending' AND target_id IN "
+            "(SELECT id FROM chapters WHERE project_id=? UNION SELECT id FROM scenes "
+            "WHERE project_id=? UNION SELECT id FROM entities WHERE project_id=?)",
+            (project_id, project_id, project_id)).fetchone()["n"]
+        return debt
+
+
+@mcp.tool()
+def project_dashboard_get(project_id: str) -> dict:
+    """The room's dashboard, in spec §15.3 priority order: what changed, what's working
+    (protect), blocking/major findings, decisions awaiting the owner, reviews waiting,
+    stale analyses, and the debt summary. Never leads with one synthetic score."""
+    with _db() as conn:
+        if conn.execute("SELECT 1 FROM projects WHERE id=? AND deleted=0",
+                        (project_id,)).fetchone() is None:
+            raise ValueError(f"project {project_id} not found")
+        dash: dict = {}
+        changed = []
+        for r in conn.execute(
+                "SELECT r.target_type, r.target_id, r.rev, r.note, r.created_by, r.created_at "
+                "FROM revisions r ORDER BY r.created_at DESC LIMIT 30"):
+            tbl = TARGET_TABLES[r["target_type"]]
+            owner_row = conn.execute(
+                f"SELECT project_id, COALESCE(title, '') AS t FROM {tbl} WHERE id=?"
+                if r["target_type"] != "entity" else
+                f"SELECT project_id, name AS t FROM {tbl} WHERE id=?",
+                (r["target_id"],)).fetchone()
+            if owner_row is None or owner_row["project_id"] != project_id:
+                continue
+            changed.append({"what": owner_row["t"], "type": r["target_type"], "rev": r["rev"],
+                            "by": r["created_by"], "at": r["created_at"], "note": r["note"]})
+            if len(changed) >= 10:
+                break
+        dash["what_changed"] = changed
+        dash["protect"] = _rows(conn.execute(
+            "SELECT evidence_quote, explanation, target_id FROM strengths WHERE project_id=? "
+            "ORDER BY created_at DESC LIMIT 10", (project_id,)))
+        dash["blocking_major_findings"] = _rows(conn.execute(
+            "SELECT id, severity, category, target_id, evidence_quote, smallest_intervention "
+            "FROM findings WHERE project_id=? AND status='open' "
+            "AND severity IN ('blocking','major')", (project_id,)))
+        awaiting = {"pending_proposals": [], "open_blocking": len(dash["blocking_major_findings"])}
+        for p in conn.execute(
+                "SELECT id, target_type, target_id, created_by, created_at FROM proposals "
+                "WHERE status='pending' ORDER BY created_at"):
+            row = conn.execute(
+                f"SELECT project_id FROM {TARGET_TABLES[p['target_type']]} WHERE id=?",
+                (p["target_id"],)).fetchone()
+            if row is not None and row["project_id"] == project_id:
+                awaiting["pending_proposals"].append(dict(p))
+        dash["awaiting_owner"] = awaiting
+        dash["reviews_waiting"] = _rows(conn.execute(
+            "SELECT id, analysis_type, target_id, status, created_at FROM analysis_runs "
+            "WHERE project_id=? AND status IN ('queued','running') ORDER BY created_at",
+            (project_id,)))
+        dash["debt"] = narrative_debt_list(project_id)
+        dash["seam"] = seam_get(project_id)
+        return dash
 
 
 # ---------------------------------------------------------------- appearances & timeline
