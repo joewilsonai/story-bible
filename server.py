@@ -2598,16 +2598,23 @@ def build_app():
         key = headers.get("x-api-key", "")
         if not key and headers.get("authorization", "").lower().startswith("bearer "):
             key = headers["authorization"][7:]
+        url_key = False
         if not key:
             # Clients whose connector UIs can't set headers (ChatGPT custom connectors)
             # may carry the key in the URL: /mcp?key=... Access logging is disabled in
-            # __main__ so credentials never land in server logs (spec §18).
+            # __main__ so credentials never land in our logs (spec §18). Upstream edge
+            # logs are outside our control, so this transport is HARD-CAPPED below:
+            # a URL-carried key never exercises more than editor (propose/comment)
+            # authority, whatever role the key itself holds.
             qs = scope.get("query_string", b"").decode()
             for pair in qs.split("&"):
                 if pair.startswith("key="):
                     key = pair[4:]
+                    url_key = True
                     break
         ident = keys.get(key)
+        if ident is not None and url_key and ident["role"] != "editor":
+            ident = {"name": ident["name"], "role": "editor"}
         if ident is None:
             await send({"type": "http.response.start", "status": 401,
                         "headers": [(b"content-type", b"application/json")]})
