@@ -101,7 +101,18 @@ h2.viewtitle{font-family:var(--display);font-weight:400;font-size:1.7rem;margin-
 .notecard .nbody{font-size:.92rem;color:var(--dim);line-height:1.55}
 
 /* ---------- editorial ink ---------- */
-u.ann{text-decoration:none;border-bottom:3px solid;padding-bottom:1px;cursor:help;border-radius:2px 2px 0 0}
+u.ann{text-decoration:none;border-bottom:3px solid;padding-bottom:1px;cursor:pointer;border-radius:2px 2px 0 0}
+.annpop{position:absolute;z-index:60;width:min(440px,86vw);background:var(--panel2);
+  border:1px solid var(--brass-dim);padding:1rem 1.2rem;box-shadow:0 12px 40px rgba(0,0,0,.6);
+  animation:fade .18s ease both}
+.annpop .aphead{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.5rem;flex-wrap:wrap}
+.annpop .apwho{font-family:var(--mono);font-size:.68rem;color:var(--brass)}
+.annpop .apbody{font-size:.9rem;color:var(--text);line-height:1.55}
+.annpop .apfix{font-size:.85rem;color:var(--dim);margin-top:.5rem}
+.annpop .apfix b{font-family:var(--mono);font-size:.6rem;letter-spacing:.18em;text-transform:uppercase;color:var(--brass)}
+.annpop .apreb{border-left:2px solid var(--seal);padding:.3rem .7rem;margin-top:.6rem;
+  font-size:.85rem;color:var(--dim);font-style:italic}
+.annpop .apreb b{font-family:var(--mono);font-size:.64rem;font-style:normal;color:var(--seal)}
 .ann-strong{color:#b9e08f;border-color:#8fc060;background:rgba(150,190,110,.12)}
 .ann-weak{color:#ff9068;border-color:#ff6a3c;background:rgba(224,90,50,.14)}
 .ann-mid{color:#ffd27f;border-color:#e0a94e;background:rgba(216,170,90,.13)}
@@ -200,14 +211,17 @@ let KEY = localStorage.getItem("sb_key") || "";
 let PROJECT = null, PROJECTS = [], VIEW = {name:"desk"}, KINDCOUNTS = {};
 let INK = localStorage.getItem("sb_ink") !== "off";
 
+let ANN = [];
 function inkMark(text, anns){
   let items = [];
   (anns.strengths||[]).forEach(s=>items.push({q:s.evidence_quote, cls:"ann-strong",
-    tip:"PROTECT · "+s.explanation}));
+    label:"PROTECT", chip:"final", who:s.by, model:s.model,
+    body:s.explanation, fix:"", status:"", rebuttals:[]}));
   (anns.findings||[]).forEach(f=>items.push({q:f.evidence_quote,
     cls:(f.severity==="blocking"||f.severity==="major")?"ann-weak":"ann-mid",
-    tip:f.severity.toUpperCase()+" · "+f.category+" · "+f.explanation
-        +(f.smallest_intervention?" — FIX: "+f.smallest_intervention:"")}));
+    label:f.severity.toUpperCase()+" · "+f.category, chip:f.severity,
+    who:f.by, model:f.model, body:f.explanation,
+    fix:f.smallest_intervention||"", status:f.status, rebuttals:f.rebuttals||[]}));
   items = items.filter(it=>it.q && it.q.trim().length>3);
   items.sort((a,b)=>b.q.length-a.q.length);
   function find(t, q){
@@ -231,21 +245,44 @@ function inkMark(text, anns){
     for(const chunk of chunks){
       const ci = text.indexOf(chunk, cursor);
       if(ci<0) continue;
-      const n = marks.length;
+      const n = ANN.length;
       text = text.slice(0,ci)+`⟦S${n}⟧`+chunk+`⟦E${n}⟧`+text.slice(ci+chunk.length);
       cursor = ci + chunk.length + 10;
-      marks.push(it);
+      ANN.push(it); marks.push(n);
     }
   }
   return {text, marks};
 }
 function inkApply(html, marks){
-  marks.forEach((it,n)=>{
-    html = html.split(`⟦S${n}⟧`).join(`<u class="ann ${it.cls}" title="${esc(it.tip)}">`)
-               .split(`⟦E${n}⟧`).join("</u>");
-  });
+  for(const n of marks){
+    const it = ANN[n];
+    html = html.split(`⟦S${n}⟧`).join(
+      `<u class="ann ${it.cls}" onclick="annPop(event,${n})">`)
+      .split(`⟦E${n}⟧`).join("</u>");
+  }
   return html.replace(/⟦[SE]\d+⟧/g,"");
 }
+function annPop(ev, n){
+  ev.stopPropagation();
+  document.querySelectorAll(".annpop").forEach(x=>x.remove());
+  const it = ANN[n]; if(!it) return;
+  const who = it.who ? `${it.who} · ${it.model||""}` : "";
+  let h = `<div class="aphead"><span class="chip ${it.chip}">${esc(it.label)}</span>
+    <span class="apwho">${esc(who)}</span>
+    ${it.status?`<span class="chip" style="margin-left:auto">${esc(it.status)}</span>`:""}</div>
+    <div class="apbody">${esc(it.body)}</div>`;
+  if(it.fix) h += `<div class="apfix"><b>Smallest fix</b> ${esc(it.fix)}</div>`;
+  for(const r of it.rebuttals||[])
+    h += `<div class="apreb"><b>${esc(r.created_by)} dissents:</b> ${esc(r.body)}</div>`;
+  const pop = document.createElement("div");
+  pop.className = "annpop"; pop.innerHTML = h;
+  pop.onclick = e=>e.stopPropagation();
+  document.body.appendChild(pop);
+  const x = Math.min(ev.pageX, window.scrollX + window.innerWidth - pop.offsetWidth - 20);
+  pop.style.left = Math.max(10, x) + "px";
+  pop.style.top = (ev.pageY + 14) + "px";
+}
+document.addEventListener("click", ()=>document.querySelectorAll(".annpop").forEach(x=>x.remove()));
 
 async function api(name, args){
   const r = await fetch("/mcp", {method:"POST",
@@ -478,7 +515,8 @@ async function vChapter(id){
   h+=`<div class="chaptertitle">${esc(ch.title)}</div>
       <div class="statlbl" style="text-align:center;margin-bottom:0">rev ${ch.rev} · updated ${when(ch.updated_at)} · ${esc(ch.status)}</div>
       <div class="chapterrule"></div>`;
-  if(INK) h+=`<div class="inklegend"><span class="lg">strong</span><span class="ly">mediocre</span><span class="lr">weak</span> <span style="border:none">· hover for why</span></div>`;
+  ANN = [];
+  if(INK) h+=`<div class="inklegend"><span class="lg">strong</span><span class="ly">mediocre</span><span class="lr">weak</span> <span style="border:none">· click any mark for the note & who made the call</span></div>`;
   function inked(text, anns){
     if(!INK || !anns) return md(text);
     const {text:marked, marks} = inkMark(text, anns);
