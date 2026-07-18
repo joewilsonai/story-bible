@@ -82,6 +82,23 @@ h2.viewtitle{font-family:var(--display);font-weight:400;font-size:1.7rem;margin-
 .chip.outline{color:var(--outline)} .chip.draft{color:var(--draft)}
 .chip.revised{color:var(--revised)} .chip.final{color:var(--final);border-color:var(--brass-dim)}
 .chip.pending{color:var(--seal);border-color:var(--seal)}
+.chip.blocking{color:#e06a45;border-color:#e06a45} .chip.major{color:var(--draft)}
+.chip.minor{color:var(--dim)} .chip.watch{color:var(--faint)}
+.chip.pass{color:var(--revised)} .chip.revise{color:var(--draft)}
+.chip.stale{color:var(--faint);border-style:dashed}
+.evq{border-left:2px solid var(--brass-dim);padding:.5rem .9rem;font-style:italic;
+  color:var(--text);margin:.5rem 0;background:rgba(208,160,75,.05);font-size:.95rem}
+.fnd{border:1px solid var(--line);padding:1rem 1.1rem;margin:.7rem 0;animation:fade .4s ease both}
+.fnd .fhead{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.4rem}
+.fnd .cat{font-family:var(--mono);font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+.fnd .expl{font-size:.92rem;color:var(--dim);line-height:1.6}
+.fnd .fix{font-size:.88rem;color:var(--text);margin-top:.5rem}
+.fnd .fix b{font-family:var(--mono);font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;color:var(--brass)}
+.deskhead{font-family:var(--mono);font-size:.64rem;letter-spacing:.24em;text-transform:uppercase;color:var(--brass);margin:2.2rem 0 .8rem}
+.notecard{border-left:2px solid var(--line);padding:.6rem 1rem;margin:.6rem 0}
+.notecard .who{font-family:var(--mono);font-size:.68rem;color:var(--brass)}
+.notecard .anch{font-family:var(--mono);font-size:.7rem;color:var(--faint);font-style:italic;margin:.2rem 0}
+.notecard .nbody{font-size:.92rem;color:var(--dim);line-height:1.55}
 
 /* ---------- reading ---------- */
 .prose{font-size:1.06rem;line-height:1.85;color:var(--text)}
@@ -167,7 +184,7 @@ textarea.edit{min-height:14rem;resize:vertical}
 <script>
 "use strict";
 let KEY = localStorage.getItem("sb_key") || "";
-let PROJECT = null, PROJECTS = [], VIEW = {name:"manuscript"}, KINDCOUNTS = {};
+let PROJECT = null, PROJECTS = [], VIEW = {name:"desk"}, KINDCOUNTS = {};
 
 async function api(name, args){
   const r = await fetch("/mcp", {method:"POST",
@@ -243,7 +260,9 @@ async function refresh(){
 const KINDS=["character","faction","location","arc","narrative","thread","event","lore","item","theme","research","style","note"];
 function drawNav(proj, pendingN){
   let h = "<div class='sect'>Book</div>";
+  h += navItem("desk","The Desk","");
   h += navItem("manuscript","Manuscript", proj.chapter_count||"");
+  h += navItem("reviews","Reviews","");
   h += navItem("proposals","Proposals", pendingN, pendingN>0);
   h += navItem("stats","The Ledger","");
   h += "<div class='sect'>Bible</div>";
@@ -268,13 +287,95 @@ function main(html){document.getElementById("main").innerHTML=html;stagger()}
 async function render(){
   main("<div class='loading'>Turning pages…</div>");
   try{
-    if(VIEW.name==="manuscript") await vManuscript();
+    if(VIEW.name==="desk") await vDesk();
+    else if(VIEW.name==="manuscript") await vManuscript();
     else if(VIEW.name==="chapter") await vChapter(VIEW.id);
+    else if(VIEW.name==="reviews") await vReviews();
+    else if(VIEW.name==="run") await vRun(VIEW.id);
     else if(VIEW.name==="proposals") await vProposals();
     else if(VIEW.name==="stats") await vStats();
     else if(VIEW.name.startsWith("kind:")) await vKind(VIEW.name.slice(5));
     else if(VIEW.name==="entity") await vEntity(VIEW.id);
   }catch(e){main(`<div class='empty'>Couldn't load: ${esc(e.message)}</div>`)}
+}
+
+async function vDesk(){
+  const d = await api("project_dashboard_get",{project_id:PROJECT.id});
+  let h="<h2 class='viewtitle'>The Desk</h2>";
+  if(d.what_changed.length){h+="<div class='deskhead'>What changed</div>";
+    for(const c of d.what_changed) h+=`<div class="row" style="cursor:default">
+      <span class="no">r${c.rev}</span><span class="t" style="font-size:.98rem">${esc(c.what)}</span>
+      <span class="m">${esc(c.by)}${c.note?" · "+esc(c.note):""}</span></div>`;}
+  if(d.protect.length){h+="<div class='deskhead'>Working — protect these</div>";
+    for(const p of d.protect) h+=`<div class="evq">"${esc(p.evidence_quote)}"<div style="font-style:normal;color:var(--dim);font-size:.85rem;margin-top:.3rem">${esc(p.explanation)}</div></div>`;}
+  if(d.blocking_major_findings.length){h+="<div class='deskhead'>Blocking & major findings</div>";
+    for(const f of d.blocking_major_findings) h+=`<div class="fnd">
+      <div class="fhead"><span class="chip ${f.severity}">${f.severity}</span><span class="cat">${esc(f.category)}</span></div>
+      <div class="evq">"${esc(f.evidence_quote.slice(0,160))}${f.evidence_quote.length>160?"…":""}"</div>
+      <div class="fix"><b>Smallest fix</b> ${esc(f.smallest_intervention)}</div></div>`;}
+  h+="<div class='deskhead'>Awaiting your ruling</div>";
+  const aw=d.awaiting_owner;
+  h+=`<div class="row" onclick="go('proposals')"><span class="no">${aw.pending_proposals.length}</span>
+      <span class="t" style="font-size:.95rem">pending proposals</span></div>`;
+  h+=`<div class="row" style="cursor:default"><span class="no">${aw.open_blocking}</span>
+      <span class="t" style="font-size:.95rem">open blocking/major findings</span></div>`;
+  if(d.reviews_waiting.length){h+="<div class='deskhead'>Reviews in flight</div>";
+    for(const r of d.reviews_waiting) h+=`<div class="row" onclick="go('reviews')">
+      <span class="no">${r.status==="running"?"…":"Q"}</span>
+      <span class="t" style="font-size:.95rem">${esc(r.analysis_type)}</span>
+      <span class="m">${esc(r.created_at.slice(11,16))}</span></div>`;}
+  const db=d.debt;
+  h+="<div class='deskhead'>The promises ledger</div>";
+  h+=`<table class="kv">
+    <tr><td>open threads</td><td>${db.open_threads.length}</td></tr>
+    <tr><td>claims needing attention</td><td>${db.claims_needing_attention.length}</td></tr>
+    <tr><td>watch items</td><td>${db.watch_items.length}</td></tr>
+    <tr><td>stale analyses</td><td>${db.stale_analyses}</td></tr></table>`;
+  if(d.seam && d.seam.last_verified)
+    h+=`<div class="statlbl" style="margin-top:1.4rem">seam · reality through: ${esc(d.seam.last_verified.slice(0,80))}</div>`;
+  main(h);
+}
+
+async function vReviews(){
+  const runs = await api("analysis_run_list",{project_id:PROJECT.id});
+  let h="<h2 class='viewtitle'>Reviews</h2>";
+  if(!runs.length){main(h+"<div class='empty'>No analysis runs yet. Queue one and Sol takes the chair.</div>");return}
+  for(const r of runs) h+=`<div class="row" onclick="VIEW={name:'run',id:'${r.id}'};render()">
+    <span class="no">r${r.target_rev}</span>
+    <span class="t" style="font-size:1rem">${esc(r.analysis_type)}</span>
+    <span class="m">${esc(r.model)}</span>
+    ${r.stale?'<span class="chip stale">stale</span>':""}
+    <span class="chip ${r.status==="complete"?(r.verdict||"pass"):"pending"}">${r.status==="complete"?esc(r.verdict):r.status}</span></div>`;
+  main(h);
+}
+
+async function vRun(id){
+  const r = await api("analysis_run_get",{run_id:id});
+  let h=`<div class="crumb"><a onclick="go('reviews')">Reviews</a> / ${esc(r.analysis_type)}
+    <span class="chip ${r.verdict||'pending'}" style="margin-left:.8rem">${esc(r.verdict||r.status)}</span>
+    ${r.stale?'<span class="chip stale">stale — target has moved</span>':""}</div>`;
+  h+=`<div class="chaptertitle" style="text-align:left;font-size:1.5rem">${esc(r.analysis_type)} · rev ${r.target_rev}</div>`;
+  h+=`<div class="statlbl">${esc(r.model)} · ${esc(r.reasoning_effort)} reasoning · ${esc((r.completed_at||"").slice(0,16))}</div>`;
+  if(r.intent_summary) h+=`<div class="blockhead">Intended</div><div class="lede">${esc(r.intent_summary)}</div>`;
+  if(r.observed_summary) h+=`<div class="blockhead">Observed</div><div class="lede">${esc(r.observed_summary)}</div>`;
+  const sk=Object.keys(r.scores||{});
+  if(sk.length){h+="<div class='blockhead'>Scores</div>";
+    for(const k of sk) h+=`<div class="bar"><span class="bl">${esc(k.replace(/_/g," "))}</span>
+      <span class="bt"><span class="bf" style="width:${Math.min(100,r.scores[k])}%"></span></span>
+      <span class="bn">${r.scores[k]}</span></div>`;}
+  if(r.strengths.length){h+="<div class='blockhead'>Strengths to protect</div>";
+    for(const s of r.strengths) h+=`<div class="evq">"${esc(s.evidence_quote)}"<div style="font-style:normal;color:var(--dim);font-size:.85rem;margin-top:.3rem">${esc(s.explanation)}</div></div>`;}
+  if(r.findings.length){h+="<div class='blockhead'>Findings</div>";
+    for(const f of r.findings) h+=`<div class="fnd">
+      <div class="fhead"><span class="chip ${f.severity}">${f.severity}</span>
+        <span class="cat">${esc(f.category)} · conf ${f.confidence}</span>
+        <span class="chip" style="margin-left:auto">${esc(f.status)}</span></div>
+      <div class="evq">"${esc(f.evidence_quote)}"</div>
+      <div class="expl">${esc(f.explanation)}</div>
+      <div class="fix"><b>Smallest fix</b> ${esc(f.smallest_intervention)}</div></div>`;}
+  if((r.limitations||[]).length){h+="<div class='blockhead'>Limitations Sol declared</div>";
+    for(const l of r.limitations) h+=`<div class="notecard"><div class="nbody">${esc(l)}</div></div>`;}
+  main(h);
 }
 
 async function vManuscript(){
@@ -309,6 +410,13 @@ async function vChapter(id){
     }
   } else {
     h+=`<div class="prose">${md(ch.content_md)}</div>`;
+  }
+  const notes = await api("comment_list",{target_type:"chapter",target_id:id,status:"open"});
+  if(notes.length){
+    h+="<div class='blockhead'>Margin notes ("+notes.length+" open)</div>";
+    for(const n of notes) h+=`<div class="notecard"><div class="who">${esc(n.created_by)}</div>
+      ${n.anchor_quote?`<div class="anch">on: "${esc(n.anchor_quote.slice(0,90))}"</div>`:""}
+      <div class="nbody">${esc(n.body)}</div></div>`;
   }
   main(h);
 }
