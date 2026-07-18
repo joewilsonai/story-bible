@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Story Bible</title>
+<style>
+:root{
+  --ink:#14110d; --panel:#1b1712; --panel2:#211c15; --line:#332c21;
+  --text:#e9e1d0; --dim:#9a8f7a; --faint:#6b6355;
+  --brass:#d0a04b; --brass-dim:#8a6b34; --seal:#c05b35;
+  --outline:#6b6355; --draft:#c9a35a; --revised:#93a878; --final:#d0a04b;
+  --serif:"Iowan Old Style","Palatino Nova",Palatino,"Book Antiqua",Georgia,serif;
+  --display:"Hoefler Text","Big Caslon","Iowan Old Style",Georgia,serif;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{height:100%}
+body{
+  min-height:100%;background:var(--ink);color:var(--text);
+  font-family:var(--serif);font-size:16px;line-height:1.5;
+  background-image:radial-gradient(ellipse 1200px 600px at 20% -10%,rgba(208,160,75,.05),transparent),
+                   radial-gradient(ellipse 900px 500px at 110% 110%,rgba(192,91,53,.04),transparent);
+}
+::selection{background:rgba(208,160,75,.28)}
+a{color:var(--brass);text-decoration:none}
+button{font-family:var(--mono);cursor:pointer}
+
+/* ---------- login ---------- */
+#login{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--ink);z-index:50}
+#login .card{width:min(400px,90vw);text-align:center;padding:3rem 2.4rem;border:1px solid var(--line);
+  background:linear-gradient(180deg,var(--panel2),var(--panel));animation:rise .6s ease both}
+#login h1{font-family:var(--display);font-weight:400;font-size:2rem;letter-spacing:.35em;text-transform:uppercase;color:var(--text)}
+#login .rule{width:56px;height:1px;background:var(--brass);margin:1.1rem auto 1.4rem}
+#login p{color:var(--dim);font-style:italic;margin-bottom:1.6rem;font-size:.95rem}
+#login input{width:100%;padding:.7rem .9rem;background:var(--ink);border:1px solid var(--line);color:var(--text);
+  font-family:var(--mono);font-size:.85rem;letter-spacing:.03em}
+#login input:focus{outline:none;border-color:var(--brass-dim)}
+#login button{margin-top:1rem;width:100%;padding:.7rem;background:var(--brass);border:none;color:#181307;
+  font-size:.8rem;letter-spacing:.25em;text-transform:uppercase}
+#login button:hover{background:#e0b566}
+#login .err{color:var(--seal);font-size:.85rem;margin-top:.9rem;min-height:1.2em}
+
+/* ---------- shell ---------- */
+#app{display:none;min-height:100vh}
+#app.on{display:grid;grid-template-columns:250px 1fr;grid-template-rows:auto 1fr}
+header{grid-column:1/3;display:flex;align-items:baseline;gap:1.2rem;padding:.9rem 1.4rem;
+  border-bottom:1px solid var(--line);background:rgba(20,17,13,.9)}
+header .mark{font-family:var(--display);letter-spacing:.3em;text-transform:uppercase;font-size:.8rem;color:var(--brass)}
+header .proj{font-family:var(--display);font-size:1.05rem}
+header .words{margin-left:auto;font-family:var(--mono);font-size:.72rem;color:var(--dim)}
+header .btn{background:none;border:1px solid var(--line);color:var(--dim);font-size:.68rem;
+  padding:.3rem .7rem;letter-spacing:.12em;text-transform:uppercase}
+header .btn:hover{border-color:var(--brass-dim);color:var(--text)}
+
+nav{border-right:1px solid var(--line);padding:1.4rem 0;background:var(--panel)}
+nav .sect{font-family:var(--mono);font-size:.62rem;letter-spacing:.28em;text-transform:uppercase;
+  color:var(--faint);padding:.9rem 1.4rem .4rem}
+nav .item{display:flex;justify-content:space-between;align-items:center;padding:.42rem 1.4rem;color:var(--dim);
+  cursor:pointer;border-left:2px solid transparent;font-size:.92rem}
+nav .item:hover{color:var(--text)}
+nav .item.on{color:var(--text);border-left-color:var(--brass);background:rgba(208,160,75,.06)}
+nav .item .n{font-family:var(--mono);font-size:.68rem;color:var(--faint)}
+nav .item .n.hot{color:var(--seal)}
+
+main{padding:2.4rem 3rem 5rem;max-width:78ch;width:100%;justify-self:center;animation:fade .35s ease both}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+
+/* ---------- lists ---------- */
+.crumb{font-family:var(--mono);font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin-bottom:1.6rem}
+.crumb a{color:var(--dim)} .crumb a:hover{color:var(--brass)}
+h2.viewtitle{font-family:var(--display);font-weight:400;font-size:1.7rem;margin-bottom:1.8rem}
+.row{display:flex;align-items:baseline;gap:1rem;padding:.85rem .2rem;border-bottom:1px solid var(--line);
+  cursor:pointer;animation:fade .4s ease both}
+.row:hover{background:rgba(208,160,75,.04)}
+.row .no{font-family:var(--mono);font-size:.7rem;color:var(--faint);width:2.2rem;flex:none}
+.row .t{font-family:var(--display);font-size:1.08rem;flex:1}
+.row .m{font-family:var(--mono);font-size:.68rem;color:var(--dim);flex:none}
+.chip{font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;
+  padding:.14rem .5rem;border:1px solid var(--line);border-radius:2px;flex:none}
+.chip.outline{color:var(--outline)} .chip.draft{color:var(--draft)}
+.chip.revised{color:var(--revised)} .chip.final{color:var(--final);border-color:var(--brass-dim)}
+.chip.pending{color:var(--seal);border-color:var(--seal)}
+
+/* ---------- reading ---------- */
+.prose{font-size:1.06rem;line-height:1.85;color:var(--text)}
+.prose p{margin:0 0 1.1em;text-align:justify;hyphens:auto}
+.prose p+p{text-indent:1.6em;margin-top:-1.1em;padding-top:1.1em}
+.prose h1,.prose h2,.prose h3{font-family:var(--display);font-weight:400;margin:1.6em 0 .7em;line-height:1.3}
+.prose blockquote{border-left:2px solid var(--brass-dim);padding-left:1.1em;color:var(--dim);font-style:italic;margin:0 0 1.1em}
+.prose ul{margin:0 0 1.1em 1.4em}
+.asterism{text-align:center;color:var(--brass);letter-spacing:.6em;margin:1.8em 0;font-size:1.05rem}
+.chaptertitle{font-family:var(--display);font-weight:400;font-size:2rem;text-align:center;margin:1rem 0 .4rem}
+.chapterrule{width:64px;height:1px;background:var(--brass);margin:1rem auto 2.4rem}
+.scenehead{display:flex;gap:.6rem;align-items:baseline;margin:2.2rem 0 .8rem;opacity:.85}
+.scenehead .st{font-family:var(--mono);font-size:.66rem;letter-spacing:.2em;text-transform:uppercase;color:var(--faint)}
+.empty{color:var(--faint);font-style:italic;padding:2rem 0}
+
+/* ---------- sheets / cards ---------- */
+.lede{font-style:italic;color:var(--dim);font-size:1.05rem;margin-bottom:1.6rem}
+.kv{width:100%;border-collapse:collapse;margin:1.4rem 0;font-size:.88rem}
+.kv td{padding:.4rem .6rem;border-bottom:1px solid var(--line)}
+.kv td:first-child{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);width:11rem}
+.cardgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:.8rem}
+.card{border:1px solid var(--line);background:var(--panel);padding:1rem 1.1rem;cursor:pointer;animation:fade .4s ease both}
+.card:hover{border-color:var(--brass-dim)}
+.card .t{font-family:var(--display);font-size:1.02rem;margin-bottom:.3rem}
+.card .s{color:var(--dim);font-size:.82rem;line-height:1.45;font-style:italic}
+.blockhead{font-family:var(--mono);font-size:.64rem;letter-spacing:.24em;text-transform:uppercase;color:var(--faint);margin:2rem 0 .8rem}
+.propblock{border:1px solid var(--line);margin-bottom:1.6rem;animation:fade .4s ease both}
+.propblock .phead{display:flex;gap:.9rem;align-items:baseline;padding:.7rem 1rem;background:var(--panel);border-bottom:1px solid var(--line)}
+.propblock .phead .who{font-family:var(--mono);font-size:.72rem;color:var(--brass)}
+.propblock .body{padding:1.1rem 1.2rem}
+.propblock .lbl{font-family:var(--mono);font-size:.6rem;letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin:.8rem 0 .4rem}
+.propblock .txt{font-size:.95rem;line-height:1.7;color:var(--dim);max-height:14em;overflow:auto;padding-right:.5rem}
+.propblock .txt.new{color:var(--text)}
+.statnum{font-family:var(--display);font-size:3.4rem;line-height:1;color:var(--brass)}
+.statlbl{font-family:var(--mono);font-size:.64rem;letter-spacing:.24em;text-transform:uppercase;color:var(--faint);margin:.4rem 0 2rem}
+.bar{display:flex;align-items:center;gap:.8rem;margin:.45rem 0;animation:fade .5s ease both}
+.bar .bl{width:14rem;flex:none;font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar .bt{flex:1;height:8px;background:var(--panel2);position:relative}
+.bar .bf{position:absolute;inset:0 auto 0 0;background:linear-gradient(90deg,var(--brass-dim),var(--brass))}
+.bar .bn{font-family:var(--mono);font-size:.68rem;color:var(--dim);width:4.5rem;text-align:right;flex:none}
+.loading{color:var(--faint);font-family:var(--mono);font-size:.75rem;letter-spacing:.2em;text-transform:uppercase;padding:3rem 0;text-align:center}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="card">
+    <h1>Story Bible</h1>
+    <div class="rule"></div>
+    <p>the one source of truth</p>
+    <input id="keyin" type="password" placeholder="API key" autocomplete="off"
+           onkeydown="if(event.key==='Enter')doLogin()">
+    <button onclick="doLogin()">Open the book</button>
+    <div class="err" id="loginerr"></div>
+  </div>
+</div>
+
+<div id="app">
+  <header>
+    <span class="mark">Story Bible</span>
+    <span class="proj" id="projname"></span>
+    <span class="words" id="projwords"></span>
+    <button class="btn" onclick="refresh()">Refresh</button>
+    <button class="btn" onclick="logout()">Lock</button>
+  </header>
+  <nav id="nav"></nav>
+  <main id="main"><div class="loading">Opening…</div></main>
+</div>
+
+<script>
+"use strict";
+let KEY = localStorage.getItem("sb_key") || "";
+let PROJECT = null, PROJECTS = [], VIEW = {name:"manuscript"}, KINDCOUNTS = {};
+
+async function api(name, args){
+  const r = await fetch("/mcp", {method:"POST",
+    headers:{"X-API-Key":KEY,"Content-Type":"application/json",
+             "Accept":"application/json, text/event-stream"},
+    body:JSON.stringify({jsonrpc:"2.0",id:Date.now(),method:"tools/call",
+                         params:{name, arguments:args||{}}})});
+  if(r.status===401){logout();throw new Error("bad key")}
+  const j = await r.json();
+  if(j.error) throw new Error(j.error.message||"server error");
+  const res = j.result||{};
+  if(res.isError) throw new Error((res.content||[]).map(c=>c.text).join(" "));
+  const sc = res.structuredContent;
+  if(sc!==undefined && sc!==null) return (typeof sc==="object" && "result" in sc)? sc.result : sc;
+  return JSON.parse((res.content||[]).map(c=>c.text).join(""));
+}
+
+function esc(s){return (s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function md(src){
+  if(!src||!src.trim()) return "<div class='empty'>Nothing written here yet.</div>";
+  const out=[];
+  for(const blk of src.split(/\n{2,}/)){
+    const b=blk.trim(); if(!b) continue;
+    if(/^(\*\s?){3,}$|^(\* ){2,}\*$|^\*\*\*$/.test(b)){out.push("<div class='asterism'>⁂</div>");continue}
+    let h=b.match(/^(#{1,3})\s+(.*)$/s);
+    if(h){out.push(`<h${h[1].length+1}>${inline(h[2])}</h${h[1].length+1}>`);continue}
+    if(b.startsWith(">")){out.push(`<blockquote>${inline(b.replace(/^>\s?/gm,""))}</blockquote>`);continue}
+    if(/^[-*]\s/m.test(b)&&b.split("\n").every(l=>/^[-*]\s/.test(l))){
+      out.push("<ul>"+b.split("\n").map(l=>`<li>${inline(l.replace(/^[-*]\s/,""))}</li>`).join("")+"</ul>");continue}
+    out.push(`<p>${inline(b).replace(/\n/g,"<br>")}</p>`);
+  }
+  return out.join("");
+}
+function inline(s){
+  return esc(s).replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>")
+               .replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<em>$2</em>");
+}
+function words(chars){return chars? "~"+(Math.round(chars/6/10)*10).toLocaleString()+" w":""}
+function stagger(){document.querySelectorAll("main .row, main .card, main .bar, main .propblock")
+  .forEach((el,i)=>el.style.animationDelay=Math.min(i*35,420)+"ms")}
+
+/* ---------- auth ---------- */
+async function doLogin(){
+  KEY=document.getElementById("keyin").value.trim();
+  try{ await boot(); localStorage.setItem("sb_key",KEY); }
+  catch(e){ document.getElementById("loginerr").textContent="That key didn't open it."; }
+}
+function logout(){localStorage.removeItem("sb_key");KEY="";
+  document.getElementById("app").classList.remove("on");
+  document.getElementById("login").style.display="flex";}
+
+async function boot(){
+  PROJECTS = await api("project_list");
+  document.getElementById("login").style.display="none";
+  document.getElementById("app").classList.add("on");
+  PROJECT = PROJECTS[0]||null;
+  await refresh();
+}
+
+async function refresh(){
+  if(!PROJECT){main("<div class='empty'>No projects yet. The first chapter is waiting to happen.</div>");return}
+  const [proj, pending] = await Promise.all([
+    api("project_get",{project_id:PROJECT.id}),
+    api("proposal_list",{status:"pending"})
+  ]);
+  KINDCOUNTS = proj.entity_counts||{};
+  document.getElementById("projname").textContent = proj.name;
+  drawNav(proj, pending.length);
+  render();
+}
+
+/* ---------- nav ---------- */
+const KINDS=["character","faction","location","arc","narrative","thread","event","lore","item","theme","research","style","note"];
+function drawNav(proj, pendingN){
+  let h = "<div class='sect'>Book</div>";
+  h += navItem("manuscript","Manuscript", proj.chapter_count||"");
+  h += navItem("proposals","Proposals", pendingN, pendingN>0);
+  h += navItem("stats","The Ledger","");
+  h += "<div class='sect'>Bible</div>";
+  for(const k of KINDS){ if(KINDCOUNTS[k]) h += navItem("kind:"+k, k.charAt(0).toUpperCase()+k.slice(1)+"s", KINDCOUNTS[k]); }
+  if(PROJECTS.length>1){
+    h += "<div class='sect'>Projects</div>";
+    for(const p of PROJECTS) h += `<div class="item ${PROJECT.id===p.id?'on':''}" onclick="switchProject('${p.id}')"><span>${esc(p.name)}</span></div>`;
+  }
+  document.getElementById("nav").innerHTML=h;
+}
+function navItem(id,label,n,hot){
+  const on = VIEW.name===id || (VIEW.name.startsWith("kind:")&&VIEW.name===id);
+  return `<div class="item ${on?'on':''}" onclick="go('${id}')"><span>${label}</span><span class="n ${hot?'hot':''}">${n||""}</span></div>`;
+}
+async function switchProject(id){PROJECT=PROJECTS.find(p=>p.id===id);VIEW={name:"manuscript"};await refresh()}
+function go(v){VIEW={name:v};render();refresh_nav_state()}
+function refresh_nav_state(){/* nav re-highlights on next refresh; cheap immediate: */
+  document.querySelectorAll("nav .item").forEach(el=>el.classList.remove("on"));}
+function main(html){document.getElementById("main").innerHTML=html;stagger()}
+
+/* ---------- views ---------- */
+async function render(){
+  main("<div class='loading'>Turning pages…</div>");
+  try{
+    if(VIEW.name==="manuscript") await vManuscript();
+    else if(VIEW.name==="chapter") await vChapter(VIEW.id);
+    else if(VIEW.name==="proposals") await vProposals();
+    else if(VIEW.name==="stats") await vStats();
+    else if(VIEW.name.startsWith("kind:")) await vKind(VIEW.name.slice(5));
+    else if(VIEW.name==="entity") await vEntity(VIEW.id);
+  }catch(e){main(`<div class='empty'>Couldn't load: ${esc(e.message)}</div>`)}
+}
+
+async function vManuscript(){
+  const chs = await api("chapter_list",{project_id:PROJECT.id});
+  let total=0; chs.forEach(c=>total+=c.content_chars||0);
+  document.getElementById("projwords").textContent = words(total);
+  if(!chs.length){main("<h2 class='viewtitle'>Manuscript</h2><div class='empty'>No chapters yet.</div>");return}
+  let h="<h2 class='viewtitle'>Manuscript</h2>";
+  chs.forEach((c,i)=>{
+    h+=`<div class="row" onclick="VIEW={name:'chapter',id:'${c.id}'};render()">
+      <span class="no">${String(i+1).padStart(2,"0")}</span>
+      <span class="t">${esc(c.title)}</span>
+      <span class="m">${words(c.content_chars)}</span>
+      <span class="chip ${c.status}">${c.status}</span></div>`;
+  });
+  main(h);
+}
+
+async function vChapter(id){
+  const ch = await api("chapter_get",{chapter_id:id});
+  let h=`<div class="crumb"><a onclick="go('manuscript')">Manuscript</a> / ${esc(ch.title)}
+         <span class="chip ${ch.status}" style="margin-left:.8rem">${ch.status}</span></div>`;
+  h+=`<div class="chaptertitle">${esc(ch.title)}</div><div class="chapterrule"></div>`;
+  if(ch.scenes && ch.scenes.length){
+    const scenes = await Promise.all(ch.scenes.map(s=>api("scene_get",{scene_id:s.id})));
+    for(const s of scenes){
+      h+=`<div class="scenehead"><span class="st">${esc(s.title)||"scene"}</span>
+          <span class="chip ${s.status}">${s.status}</span></div>`;
+      if(s.synopsis) h+=`<div class="lede">${esc(s.synopsis)}</div>`;
+      h+=`<div class="prose">${md(s.content_md)}</div>`;
+      if(s!==scenes[scenes.length-1]) h+="<div class='asterism'>⁂</div>";
+    }
+  } else {
+    h+=`<div class="prose">${md(ch.content_md)}</div>`;
+  }
+  main(h);
+}
+
+async function vKind(kind){
+  const ents = await api("entity_list",{project_id:PROJECT.id, kind});
+  let h=`<h2 class="viewtitle">${kind.charAt(0).toUpperCase()+kind.slice(1)}s</h2>`;
+  if(!ents.length){main(h+"<div class='empty'>None yet.</div>");return}
+  h+="<div class='cardgrid'>";
+  for(const e of ents) h+=`<div class="card" onclick="VIEW={name:'entity',id:'${e.id}',back:'kind:${kind}'};render()">
+    <div class="t">${esc(e.name)}</div><div class="s">${esc(e.summary)||"&nbsp;"}</div></div>`;
+  main(h+"</div>");
+}
+
+async function vEntity(id){
+  const e = await api("entity_get",{entity_id:id});
+  const [meta, apps] = await Promise.all([
+    api("meta_get",{target_type:"entity",target_id:id}),
+    api("entity_appearances",{entity_id:id}).catch(()=>[])
+  ]);
+  let h=`<div class="crumb"><a onclick="go('${VIEW.back||('kind:'+e.kind)}')">${e.kind}s</a> / ${esc(e.name)}</div>`;
+  h+=`<div class="chaptertitle" style="text-align:left">${esc(e.name)}</div>`;
+  if(e.summary) h+=`<div class="lede">${esc(e.summary)}</div>`;
+  h+=`<div class="prose">${md(e.content_md)}</div>`;
+  const mk = Object.keys(meta);
+  if(mk.length){h+="<div class='blockhead'>Metadata</div><table class='kv'>";
+    for(const k of mk) h+=`<tr><td>${esc(k)}</td><td>${esc(meta[k])}</td></tr>`; h+="</table>";}
+  if(apps.length){h+="<div class='blockhead'>Appears in</div>";
+    for(const a of apps) h+=`<div class="row" ${a.target_type!=="entity"?`onclick="openApp('${a.target_type}','${a.target_id}')"`:""}>
+      <span class="no">${a.count}×</span><span class="t" style="font-size:.95rem">${esc(a.title||a.target_id)}</span>
+      <span class="m">${a.target_type}</span></div>`;}
+  main(h);
+}
+async function openApp(tt,id){
+  if(tt==="chapter"){VIEW={name:"chapter",id};render()}
+  else if(tt==="scene"){const s=await api("scene_get",{scene_id:id});VIEW={name:"chapter",id:s.chapter_id};render()}
+}
+
+async function vProposals(){
+  const props = await api("proposal_list",{status:"pending"});
+  let h="<h2 class='viewtitle'>Pending Proposals</h2>";
+  if(!props.length){main(h+"<div class='empty'>Nothing awaits judgment. The editors are quiet.</div>");return}
+  for(const p of props){
+    const full = await api("proposal_get",{proposal_id:p.id});
+    h+=`<div class="propblock">
+      <div class="phead"><span class="who">${esc(p.created_by)}</span>
+        <span class="m" style="font-family:var(--mono);font-size:.66rem;color:var(--faint)">
+          ${esc(p.target_type)} · base rev ${p.base_rev}${p.stale?" · ":""}</span>
+        ${p.stale?'<span class="chip pending">stale</span>':""}
+        <span style="margin-left:auto;font-size:.85rem;font-style:italic;color:var(--dim)">${esc(p.rationale)}</span></div>
+      <div class="body">
+        <div class="lbl">Proposed</div><div class="txt new">${md(full.proposed_content_md)}</div>
+        <div class="lbl">Current (rev ${full.current_rev})</div><div class="txt">${md(full.current_content_md)}</div>
+      </div></div>`;
+  }
+  main(h+"<div class='empty' style='font-size:.85rem'>Decisions happen through author keys — this window only watches.</div>");
+}
+
+async function vStats(){
+  const s = await api("project_stats",{project_id:PROJECT.id});
+  let h="<h2 class='viewtitle'>The Ledger</h2>";
+  h+=`<div class="statnum">${s.total_words.toLocaleString()}</div><div class="statlbl">words in the manuscript</div>`;
+  if(s.target){h+=`<div class="blockhead">Target</div>
+    <div class="bar"><span class="bl">${s.target.target_words.toLocaleString()} words</span>
+    <span class="bt"><span class="bf" style="width:${Math.min(100,s.target.pct_complete)}%"></span></span>
+    <span class="bn">${s.target.pct_complete}%</span></div>`;
+    if(s.target.days_left!==undefined) h+=`<div class="statlbl" style="margin-top:.6rem">${s.target.days_left} days left${s.target.words_per_day_needed?` · ${s.target.words_per_day_needed.toLocaleString()} words/day to make it`:""}</div>`;}
+  const maxw = Math.max(1,...s.chapters.map(c=>c.words));
+  if(s.chapters.length){h+="<div class='blockhead'>Chapters</div>";
+    for(const c of s.chapters) h+=`<div class="bar"><span class="bl">${esc(c.title)}</span>
+      <span class="bt"><span class="bf" style="width:${Math.round(100*c.words/maxw)}%"></span></span>
+      <span class="bn">${c.words.toLocaleString()}</span></div>`;}
+  if(s.pov_distribution.length){h+="<div class='blockhead'>Points of View</div>";
+    const maxp=Math.max(...s.pov_distribution.map(p=>p.n));
+    for(const p of s.pov_distribution) h+=`<div class="bar"><span class="bl">${esc(p.pov)}</span>
+      <span class="bt"><span class="bf" style="width:${Math.round(100*p.n/maxp)}%"></span></span>
+      <span class="bn">${p.n} scenes</span></div>`;}
+  if(s.top_mentions.length){h+="<div class='blockhead'>Most Present</div>";
+    for(const m of s.top_mentions) h+=`<div class="bar"><span class="bl">${esc(m.name)} <span style="color:var(--faint);font-size:.75rem">(${m.kind})</span></span>
+      <span class="bn" style="width:auto">${m.total} mentions</span></div>`;}
+  h+=`<div class="blockhead">Open</div><table class="kv">
+    <tr><td>comments</td><td>${s.open_comments}</td></tr>
+    <tr><td>proposals</td><td>${s.pending_proposals}</td></tr></table>`;
+  main(h);
+}
+
+/* ---------- start ---------- */
+if(KEY){boot().catch(()=>logout())}
+</script>
+</body>
+</html>

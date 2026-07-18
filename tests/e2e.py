@@ -111,9 +111,10 @@ async def main():
             assert "_error" in stale and "stale" in stale["_error"], stale
             forced = await call(s, "proposal_accept", proposal_id=prop2["id"], force=True)
             assert "applied_as_rev" in forced
-            # search + comments
-            hits = await call(s, "search", query="forged")
-            assert any(h["type"] == "chapter" for h in hits) or True  # content changed; just ensure no crash
+            # search: entity content + arc name both contain "Regent" regardless of
+            # the chapter edits above — a deterministic hit
+            hits = await call(s, "search", query="Regent")
+            assert any(h["type"] == "entity" for h in hits), hits
             print("AUTHOR OK: accept, attribution, restore, staleness guard, force")
 
     # --- wave 2: scenes, meta, FTS search, mentions, templates, timeline, stats,

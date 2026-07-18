@@ -531,12 +531,16 @@ def chapter_delete(chapter_id: str) -> dict:
 
 # ---------------------------------------------------------------- scenes
 
-def _check_pov(conn, pov_entity_id: str | None):
+def _check_pov(conn, pov_entity_id: str | None, project_id: str):
     if pov_entity_id:
-        row = conn.execute("SELECT kind FROM entities WHERE id=? AND deleted=0",
+        row = conn.execute("SELECT kind, project_id FROM entities WHERE id=? AND deleted=0",
                            (pov_entity_id,)).fetchone()
         if row is None:
             raise ValueError(f"pov_entity_id {pov_entity_id} not found")
+        if row["project_id"] != project_id:
+            raise ValueError("pov_entity_id belongs to a different project")
+        if row["kind"] != "character":
+            raise ValueError("pov_entity_id must be a character entity")
 
 
 @mcp.tool()
@@ -552,7 +556,7 @@ def scene_create(chapter_id: str, title: str = "", synopsis: str = "", content_m
     who = _caller()["name"]
     with _db() as conn:
         ch = _get_target(conn, "chapter", chapter_id)
-        _check_pov(conn, pov_entity_id)
+        _check_pov(conn, pov_entity_id, ch["project_id"])
         sid = _id()
         conn.execute(
             "INSERT INTO scenes (id, project_id, chapter_id, title, synopsis, content_md, "
@@ -623,11 +627,11 @@ def scene_update(scene_id: str, title: str | None = None, synopsis: str | None =
     _require_author()
     who = _caller()["name"]
     with _db() as conn:
-        _get_target(conn, "scene", scene_id)
+        sc = _get_target(conn, "scene", scene_id)
         if status is not None and status not in SCENE_STATUSES:
             raise ValueError(f"status must be one of {sorted(SCENE_STATUSES)}")
         if pov_entity_id:
-            _check_pov(conn, pov_entity_id)
+            _check_pov(conn, pov_entity_id, sc["project_id"])
         for field, val in (("title", title), ("synopsis", synopsis), ("status", status),
                            ("sort_order", sort_order)):
             if val is not None:
@@ -763,9 +767,15 @@ def comment_create(target_type: str, target_id: str, body: str,
         target = _get_target(conn, target_type, target_id)
         if anchor_quote and anchor_quote not in (target["content_md"] or ""):
             raise ValueError("anchor_quote not found in current content — quote it exactly")
-        if parent_id is not None and conn.execute(
-                "SELECT 1 FROM comments WHERE id=?", (parent_id,)).fetchone() is None:
-            raise ValueError(f"parent comment {parent_id} not found")
+        if parent_id is not None:
+            parent = conn.execute(
+                "SELECT target_type, target_id FROM comments WHERE id=?",
+                (parent_id,)).fetchone()
+            if parent is None:
+                raise ValueError(f"parent comment {parent_id} not found")
+            if parent["target_type"] != target_type or parent["target_id"] != target_id:
+                raise ValueError("parent comment is on a different record — replies must "
+                                 "stay on the same entity/chapter/scene")
         cid = _id()
         conn.execute(
             "INSERT INTO comments (id, target_type, target_id, parent_id, anchor_quote, body, "
@@ -1493,25 +1503,28 @@ def export_list() -> list[dict]:
 
 # ---------------------------------------------------------------- backups
 
+_backup_lock = threading.Lock()
+
+
 def _do_backup(reason: str = "scheduled") -> dict:
-    """Write a consistent point-in-time snapshot via VACUUM INTO and rotate old ones."""
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    dest = BACKUP_DIR / f"story-{stamp}.db"
-    if dest.exists():  # same-second rerun: VACUUM INTO refuses to overwrite
-        dest.unlink()
-    conn = _db()
-    try:
-        conn.execute("VACUUM INTO ?", (str(dest),))
-    finally:
-        conn.close()
-    rotated = []
-    if BACKUP_KEEP > 0:
-        for old in sorted(BACKUP_DIR.glob("story-*.db"))[:-BACKUP_KEEP]:
-            old.unlink()
-            rotated.append(old.name)
-    return {"file": dest.name, "bytes": dest.stat().st_size, "reason": reason,
-            "rotated_out": rotated, "created_at": _now()}
+    """Write a consistent point-in-time snapshot via VACUUM INTO and rotate old ones.
+    Serialized process-wide; microsecond filenames make collisions impossible."""
+    with _backup_lock:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        dest = BACKUP_DIR / f"story-{stamp}.db"
+        conn = _db()
+        try:
+            conn.execute("VACUUM INTO ?", (str(dest),))
+        finally:
+            conn.close()
+        rotated = []
+        if BACKUP_KEEP > 0:
+            for old in sorted(BACKUP_DIR.glob("story-*.db"))[:-BACKUP_KEEP]:
+                old.unlink()
+                rotated.append(old.name)
+        return {"file": dest.name, "bytes": dest.stat().st_size, "reason": reason,
+                "rotated_out": rotated, "created_at": _now()}
 
 
 def _latest_backup() -> Path | None:
@@ -1567,6 +1580,21 @@ def build_app():
             await send({"type": "http.response.start", "status": 200,
                         "headers": [(b"content-type", b"application/json")]})
             await send({"type": "http.response.body", "body": b'{"ok": true}'})
+            return
+        if scope["path"] in ("/ui", "/ui/"):
+            # Read-only viewer shell. Serves no data itself — the page calls /mcp
+            # with the API key the reader enters, so auth still gates everything.
+            page = Path(__file__).parent / "ui.html"
+            if not page.is_file():
+                await send({"type": "http.response.start", "status": 404,
+                            "headers": [(b"content-type", b"application/json")]})
+                await send({"type": "http.response.body", "body": b'{"error": "ui not bundled"}'})
+                return
+            body = page.read_bytes()
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"text/html; charset=utf-8"),
+                                    (b"content-length", str(len(body)).encode())]})
+            await send({"type": "http.response.body", "body": body})
             return
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         key = headers.get("x-api-key", "")
