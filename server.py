@@ -1853,25 +1853,28 @@ def annotations_get(target_type: str, target_id: str) -> dict:
         finds = _rows(conn.execute(
             "SELECT f.id, f.severity, f.category, f.evidence_quote, f.explanation, "
             "f.smallest_intervention, f.status, f.target_rev, "
-            "r.completed_by AS by, r.model FROM findings f "
+            "r.completed_by, r.model FROM findings f "
             "JOIN analysis_runs r ON r.id = f.run_id "
             "WHERE f.target_type=? AND f.target_id=? "
             "AND f.status IN ('open','accepted','deferred') "
             "ORDER BY f.created_at", (target_type, target_id)))
         for f in finds:
+            f["by"] = f.pop("completed_by")
             f["rebuttals"] = _rows(conn.execute(
                 "SELECT created_by, body FROM rebuttals WHERE target_kind='finding' "
                 "AND target_id=? ORDER BY created_at", (f["id"],)))
         strengths, seen = [], set()
         for r in conn.execute(
                 "SELECT s.evidence_quote, s.explanation, s.target_rev, "
-                "a.completed_by AS by, a.model FROM strengths s "
+                "a.completed_by, a.model FROM strengths s "
                 "JOIN analysis_runs a ON a.id = s.run_id "
                 "WHERE s.target_type=? AND s.target_id=? ORDER BY s.created_at DESC",
                 (target_type, target_id)):
             if r["evidence_quote"] not in seen:
                 seen.add(r["evidence_quote"])
-                strengths.append(dict(r))
+                d = dict(r)
+                d["by"] = d.pop("completed_by")
+                strengths.append(d)
         return {"findings": finds, "strengths": strengths}
 
 
