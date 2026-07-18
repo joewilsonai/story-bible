@@ -6,7 +6,7 @@ editor comments+proposes, author accepts, revision history restores,
 bad key gets 401.
 
 Inputs: a running server on 127.0.0.1:8787 with a FRESH database and
-    STORYBIBLE_KEYS="joe:author:k-joe,luna:author:k-luna,chatgpt:editor:k-gpt"
+    STORYBIBLE_KEYS="joe:owner:k-joe,luna:author:k-luna,chatgpt:editor:k-gpt"
 Run:  STORYBIBLE_DB=/tmp/sb-test.db STORYBIBLE_KEYS=... python3 server.py &
       python3 tests/e2e.py
 Side effects: writes test rows to that database (why it must be fresh).
@@ -209,6 +209,92 @@ async def main():
             sacc = await call(s, "proposal_accept", proposal_id=sprop["id"])
             assert sacc["applied_as_rev"] == 3, sacc
             print("WAVE2 EDITOR OK: scene writes blocked, scene proposal accepted as rev 3")
+
+    # --- governance: owner role, locks, silhouette, lint gates, seam, claims,
+    # --- decisions, rebuttals, parts
+    async with (await as_key("k-joe")) as (r, w, _):  # joe = OWNER
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            holly = await call(s, "entity_create", project_id=pid, kind="character",
+                               name="Holly", summary="silhouette test")
+            v = await call(s, "visibility_set", entity_id=holly["id"], visibility="silhouette")
+            assert v["visibility"] == "silhouette", v
+            lk = await call(s, "lock_set", target_type="entity", target_id=holly["id"],
+                            kind="personal_truth", reason="real-person canon")
+            assert lk["locked"] == holly["id"], lk
+    async with (await as_key("k-luna")) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            blocked_lock = await call(s, "entity_update", entity_id=holly["id"], summary="x")
+            assert "_error" in blocked_lock and "locked" in blocked_lock["_error"], blocked_lock
+            not_owner = await call(s, "lock_remove", target_type="entity", target_id=holly["id"])
+            assert "_error" in not_owner and "owner" in not_owner["_error"], not_owner
+            not_owner2 = await call(s, "decision_create", project_id=pid,
+                                    subject_type="canon", ruling="nope")
+            assert "_error" in not_owner2, not_owner2
+    async with (await as_key("k-joe")) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            ev = await call(s, "lock_list", include_events=True)
+            assert any(e["action"] == "blocked_write" and e["target_id"] == holly["id"]
+                       for e in ev["events"]), ev
+            leaky = await call(s, "chapter_create", project_id=pid, title="Leaky",
+                               content_md="That night Holly called twice.")
+            leaks = await call(s, "silhouette_leak_check", project_id=pid,
+                               chapter_id=leaky["id"])
+            assert any(l["term"] == "Holly" for l in leaks), leaks
+            gate = await call(s, "chapter_update", chapter_id=leaky["id"], status="final")
+            assert "_error" in gate and "BLOCKED" in gate["_error"], gate
+            forced = await call(s, "chapter_update", chapter_id=leaky["id"], status="final",
+                                final_override=True)
+            assert forced["status"] == "final", forced
+            decs = await call(s, "decision_list", project_id=pid)
+            assert any(d["subject_type"] == "gate_override" for d in decs), decs
+            prof = await call(s, "entity_create", project_id=pid, kind="voice_profile",
+                              name="Joe memory voice")
+            await call(s, "meta_set", target_type="entity", target_id=prof["id"],
+                       key="lint_banned", value="—;")
+            ch2 = await call(s, "chapter_create", project_id=pid, title="Lint host")
+            sc2 = await call(s, "scene_create", chapter_id=ch2["id"], title="linted",
+                             content_md="He waited — too long; then spoke.", status="draft")
+            await call(s, "meta_set", target_type="scene", target_id=sc2["id"],
+                       key="voice_profile_id", value=prof["id"])
+            lint = await call(s, "voice_lint_run", target_type="scene", target_id=sc2["id"])
+            assert len(lint) >= 2, lint
+            lgate = await call(s, "scene_update", scene_id=sc2["id"], status="final")
+            assert "_error" in lgate and "BLOCKED" in lgate["_error"], lgate
+            await call(s, "scene_update", scene_id=sc2["id"],
+                       content_md="He waited too long. Then he spoke.")
+            ok = await call(s, "scene_update", scene_id=sc2["id"], status="final")
+            assert ok["status"] == "final", ok
+            sm = await call(s, "seam_set", project_id=pid,
+                            last_verified="Kimi K3 + erased headline",
+                            first_invented="first event after that night",
+                            seam_date="2026-07-17")
+            assert sm["seam_date"] == "2026-07-17", sm
+            cl = await call(s, "research_claim_create", project_id=pid,
+                            claim="TED spread spiked in September 2008", domain="economic",
+                            classification="fact", applicable_date="2008-09-15")
+            meta_cl = await call(s, "meta_get", target_type="entity", target_id=cl["id"])
+            assert meta_cl.get("seam_side") == "pre", meta_cl
+            noev = await call(s, "research_claim_verify", claim_id=cl["id"], verdict="false")
+            assert "_error" in noev and "source" in noev["_error"], noev
+            ver = await call(s, "research_claim_verify", claim_id=cl["id"], verdict="verified",
+                             sources=[{"url": "https://example.org", "title": "t",
+                                       "source_type": "primary"}], confidence=0.95)
+            assert ver["verdict"] == "verified", ver
+            hist = await call(s, "research_claim_verifications", claim_id=cl["id"])
+            assert hist and hist[0]["sources"], hist
+            rb = await call(s, "rebuttal_create", target_kind="proposal", target_id=prop["id"],
+                            body="dissent for the record on the accepted rewrite",
+                            evidence_quote="tighter, more voice")
+            assert rb["target_kind"] == "proposal", rb
+            pt = await call(s, "part_create", project_id=pid, title="Part One")
+            await call(s, "chapter_update", chapter_id=ch2["id"], part_id=pt["id"])
+            pl = await call(s, "part_list", project_id=pid)
+            assert pl and pl[0]["chapter_count"] >= 1, pl
+            print("GOVERNANCE OK: owner role, locks+events, silhouette gate, lint gate, "
+                  "override decisions, seam, claims+verification, rebuttals, parts")
 
     # --- backups: author snapshots + pulls, editor blocked from both
     async with (await as_key("k-luna")) as (r, w, _):

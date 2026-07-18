@@ -120,6 +120,92 @@ CREATE TABLE IF NOT EXISTS node_meta (
     PRIMARY KEY (target_type, target_id, key)
 );
 
+-- Parts: optional grouping layer above chapters (Part → Chapter → Scene).
+CREATE TABLE IF NOT EXISTS parts (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    title       TEXT NOT NULL,
+    sort_order  INTEGER DEFAULT 0,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    created_by  TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+-- Locks: owner-enforced write protection. kind: content | personal_truth.
+-- A locked target rejects every mutation until unlocked; attempts are recorded.
+CREATE TABLE IF NOT EXISTS locks (
+    target_type TEXT NOT NULL,
+    target_id   TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'content',
+    reason      TEXT DEFAULT '',
+    locked_by   TEXT NOT NULL,
+    locked_at   TEXT NOT NULL,
+    PRIMARY KEY (target_type, target_id)
+);
+CREATE TABLE IF NOT EXISTS lock_events (
+    id           TEXT PRIMARY KEY,
+    target_type  TEXT NOT NULL,
+    target_id    TEXT NOT NULL,
+    action       TEXT NOT NULL,              -- blocked_write | locked | unlocked
+    attempted_by TEXT NOT NULL,
+    detail       TEXT DEFAULT '',
+    created_at   TEXT NOT NULL
+);
+
+-- Fact verifications: immutable, source-cited verdicts on research claims (spec H).
+CREATE TABLE IF NOT EXISTS verifications (
+    id           TEXT PRIMARY KEY,
+    claim_id     TEXT NOT NULL,
+    claim_rev    INTEGER NOT NULL,
+    verdict      TEXT NOT NULL,              -- verified | false | disputed | unverifiable | outdated
+    confidence   REAL DEFAULT 0,
+    sources_json TEXT NOT NULL DEFAULT '[]',
+    notes        TEXT DEFAULT '',
+    created_by   TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_verifications_claim ON verifications(claim_id, created_at);
+
+-- Fictionalization log: real fact ↔ deliberate invention, so inventions never
+-- harden into remembered biography (spec 3.12).
+CREATE TABLE IF NOT EXISTS fictionalizations (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    real_fact     TEXT NOT NULL,
+    invented_fact TEXT NOT NULL,
+    rationale     TEXT DEFAULT '',
+    target_type   TEXT DEFAULT '',
+    target_id     TEXT DEFAULT '',
+    created_by    TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+-- Decisions: Joe's rulings — the authority trail (spec 3.13). Immutable.
+CREATE TABLE IF NOT EXISTS decisions (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL,
+    subject_type TEXT NOT NULL,              -- finding | proposal | claim | gate_override | canon | other
+    subject_id   TEXT DEFAULT '',
+    ruling       TEXT NOT NULL,
+    rationale    TEXT DEFAULT '',
+    decided_by   TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id, created_at);
+
+-- Rebuttals: structured dissent against a finding or proposal (spec 3.13). Immutable.
+CREATE TABLE IF NOT EXISTS rebuttals (
+    id             TEXT PRIMARY KEY,
+    target_kind    TEXT NOT NULL,            -- proposal | finding
+    target_id      TEXT NOT NULL,
+    body           TEXT NOT NULL,
+    evidence_quote TEXT DEFAULT '',
+    location       TEXT DEFAULT '',
+    created_by     TEXT NOT NULL,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rebuttals_target ON rebuttals(target_kind, target_id);
+
 -- Mention index: where each entity's name/aliases appear in prose. Maintained
 -- automatically on content writes; rebuildable via the mentions_rebuild tool.
 CREATE TABLE IF NOT EXISTS mentions (

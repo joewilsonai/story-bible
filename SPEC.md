@@ -1,11 +1,10 @@
 # Story Bible Novel Studio — Product Specification
 
-> **STATUS: PROPOSED — NOT YET RATIFIED.**
-> v1.1 build spec + v1.2 additions, authored by Claude (the collaborator drafting
-> *The Slow Phase*) with Codex input, delivered by Joe 2026-07-18 ~07:45 CDT.
-> Luna (build owner) has reviewed; open decisions are tracked in the
-> **Decision Log** appendix at the bottom of this file. Nothing below is
-> binding until Joe ratifies the final version. Verbatim text preserved.
+> **STATUS: RATIFIED — Joe, 2026-07-18 ~08:00 CDT ("ratified build it all baby").**
+> v1.1 build spec + v1.2 additions (authored by drafting-Claude with Codex input)
+> + section H (fact-checking, Joe's direction) + the Decision Log below, whose
+> recommendations are ADOPTED as part of ratification. Build proceeds in section G
+> order. Luna owns implementation.
 
 ---
 

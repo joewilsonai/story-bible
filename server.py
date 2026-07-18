@@ -63,11 +63,20 @@ BACKUP_HOURS = float(os.environ.get("STORYBIBLE_BACKUP_HOURS", "24"))
 BACKUP_KEEP = int(os.environ.get("STORYBIBLE_BACKUP_KEEP", "14"))
 
 ENTITY_KINDS = {"arc", "narrative", "character", "faction", "lore", "event", "research", "note",
-                "location", "item", "theme", "thread", "style"}
+                "location", "item", "theme", "thread", "style",
+                "voice_profile", "narrative_profile", "rubric_profile", "scene_intent"}
 CHAPTER_STATUSES = {"draft", "revised", "final"}
 SCENE_STATUSES = {"outline", "draft", "revised", "final"}
 TARGET_TABLES = {"entity": "entities", "chapter": "chapters", "scene": "scenes"}
 META_TARGETS = {"project", "entity", "chapter", "scene"}
+ROLES = {"author", "editor", "owner"}
+NARRATIVE_MODES = {"memory", "direct", "documentary", "institutional", "transcript",
+                   "artifact", "omniscient", "mixed", ""}
+VISIBILITIES = {"public", "private", "silhouette"}
+VERDICTS = {"verified", "false", "disputed", "unverifiable", "outdated"}
+CLAIM_DOMAINS = {"technical", "scientific", "political", "historical", "geographic",
+                 "medical", "legal", "economic", "cultural", "other"}
+CLAIM_CLASSES = {"fact", "inference", "projection", "deliberate_fiction"}
 
 # caller identity for the current request: {"name": ..., "role": "author"|"editor"}
 CALLER: contextvars.ContextVar[dict] = contextvars.ContextVar("caller")
@@ -99,7 +108,7 @@ def _load_keys() -> dict:
         except ValueError:
             print(f"[story-bible] bad key entry (want name:role:key): {triple!r}", file=sys.stderr)
             continue
-        if role not in ("author", "editor"):
+        if role not in ROLES:
             print(f"[story-bible] bad role {role!r} for {name!r}", file=sys.stderr)
             continue
         keys[key] = {"name": name, "role": role}
@@ -133,7 +142,12 @@ def _init_db():
                 "FROM scenes WHERE deleted=0")
         # Guarded column additions for databases created before these existed.
         for stmt in ("ALTER TABLE links ADD COLUMN attrs TEXT DEFAULT ''",
-                     "ALTER TABLE projects ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0"):
+                     "ALTER TABLE projects ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
+                     "ALTER TABLE chapters ADD COLUMN part_id TEXT",
+                     "ALTER TABLE entities ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'",
+                     "ALTER TABLE scenes ADD COLUMN narrative_mode TEXT DEFAULT ''",
+                     "ALTER TABLE scenes ADD COLUMN story_time_start TEXT DEFAULT ''",
+                     "ALTER TABLE scenes ADD COLUMN story_time_end TEXT DEFAULT ''"):
             try:
                 conn.execute(stmt)
             except sqlite3.OperationalError as e:
@@ -155,11 +169,47 @@ def _caller() -> dict:
 
 def _require_author():
     c = _caller()
-    if c["role"] != "author":
+    if c["role"] not in ("author", "owner"):
         raise PermissionError(
             f"'{c['name']}' has editor role: read, comment, and propose only. "
             "Use proposal_create to suggest this change."
         )
+
+
+def _require_owner():
+    c = _caller()
+    if c["role"] != "owner":
+        raise PermissionError(f"'{c['name']}' is not the owner — this action is owner-only.")
+
+
+def _log_lock_event(conn, target_type: str, target_id: str, action: str, detail: str = ""):
+    conn.execute(
+        "INSERT INTO lock_events (id, target_type, target_id, action, attempted_by, detail, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (_id(), target_type, target_id, action, _caller()["name"], detail, _now()))
+
+
+def _require_unlocked(conn, target_type: str, target_id: str, action: str = "write"):
+    """Locked targets reject every mutation; the attempt itself is recorded (spec 3.12/F)."""
+    row = conn.execute("SELECT kind, reason, locked_by FROM locks WHERE target_type=? AND target_id=?",
+                       (target_type, target_id)).fetchone()
+    if row is not None:
+        # Log on an independent connection: the caller's transaction rolls back with
+        # the raised error, and the audit row must survive the refusal.
+        log_conn = _db()
+        try:
+            with log_conn:
+                log_conn.execute(
+                    "INSERT INTO lock_events (id, target_type, target_id, action, attempted_by, "
+                    "detail, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (_id(), target_type, target_id, "blocked_write", _caller()["name"],
+                     action, _now()))
+        finally:
+            log_conn.close()
+        raise PermissionError(
+            f"{target_type} {target_id} is locked ({row['kind']}"
+            + (f": {row['reason']}" if row["reason"] else "")
+            + f", by {row['locked_by']}). Only an owner decision changes locked records.")
 
 
 def _row(r: sqlite3.Row | None) -> dict | None:
@@ -385,6 +435,7 @@ def entity_update(entity_id: str, name: str | None = None, summary: str | None =
     who = _caller()["name"]
     with _db() as conn:
         _get_target(conn, "entity", entity_id)
+        _require_unlocked(conn, "entity", entity_id, "entity_update")
         for field, val in (("name", name), ("summary", summary), ("sort_order", sort_order)):
             if val is not None:
                 conn.execute(f"UPDATE entities SET {field}=?, updated_at=? WHERE id=?",
@@ -400,6 +451,7 @@ def entity_delete(entity_id: str) -> dict:
     _require_author()
     with _db() as conn:
         _get_target(conn, "entity", entity_id)
+        _require_unlocked(conn, "entity", entity_id, "entity_delete")
         conn.execute("UPDATE entities SET deleted=1, updated_at=? WHERE id=?", (_now(), entity_id))
         return {"deleted": entity_id}
 
@@ -501,21 +553,37 @@ def chapter_list(project_id: str) -> list[dict]:
 @mcp.tool()
 def chapter_update(chapter_id: str, title: str | None = None, content_md: str | None = None,
                    status: str | None = None, sort_order: int | None = None,
-                   revision_note: str = "") -> dict:
+                   part_id: str | None = None, revision_note: str = "",
+                   final_override: bool = False) -> dict:
     """Update a chapter (partial patch). content_md change records a new revision.
+    Setting status='final' runs the deterministic final gate (voice lint, silhouette
+    leaks, false facts); a blocked gate needs fixes, or an owner passing
+    final_override=true (which logs a decision). Pass part_id="" to unassign.
     Author role required."""
     _require_author()
     who = _caller()["name"]
     with _db() as conn:
         _get_target(conn, "chapter", chapter_id)
+        _require_unlocked(conn, "chapter", chapter_id, "chapter_update")
         if status is not None and status not in CHAPTER_STATUSES:
             raise ValueError(f"status must be one of {sorted(CHAPTER_STATUSES)}")
+        if part_id:
+            ch = conn.execute("SELECT project_id FROM chapters WHERE id=?", (chapter_id,)).fetchone()
+            p = conn.execute("SELECT project_id FROM parts WHERE id=? AND deleted=0",
+                             (part_id,)).fetchone()
+            if p is None or p["project_id"] != ch["project_id"]:
+                raise ValueError(f"part {part_id} not found in this project")
+        if content_md is not None:
+            _write_revision(conn, "chapter", chapter_id, content_md, revision_note, who)
+        if status == "final":
+            _gate_final(conn, "chapter", chapter_id, final_override)
         for field, val in (("title", title), ("status", status), ("sort_order", sort_order)):
             if val is not None:
                 conn.execute(f"UPDATE chapters SET {field}=?, updated_at=? WHERE id=?",
                              (val, _now(), chapter_id))
-        if content_md is not None:
-            _write_revision(conn, "chapter", chapter_id, content_md, revision_note, who)
+        if part_id is not None:
+            conn.execute("UPDATE chapters SET part_id=?, updated_at=? WHERE id=?",
+                         (part_id or None, _now(), chapter_id))
         return _row(conn.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone())
 
 
@@ -525,6 +593,7 @@ def chapter_delete(chapter_id: str) -> dict:
     _require_author()
     with _db() as conn:
         _get_target(conn, "chapter", chapter_id)
+        _require_unlocked(conn, "chapter", chapter_id, "chapter_delete")
         conn.execute("UPDATE chapters SET deleted=1, updated_at=? WHERE id=?", (_now(), chapter_id))
         return {"deleted": chapter_id}
 
@@ -628,10 +697,15 @@ def scene_update(scene_id: str, title: str | None = None, synopsis: str | None =
     who = _caller()["name"]
     with _db() as conn:
         sc = _get_target(conn, "scene", scene_id)
+        _require_unlocked(conn, "scene", scene_id, "scene_update")
         if status is not None and status not in SCENE_STATUSES:
             raise ValueError(f"status must be one of {sorted(SCENE_STATUSES)}")
         if pov_entity_id:
             _check_pov(conn, pov_entity_id, sc["project_id"])
+        if content_md is not None:
+            _write_revision(conn, "scene", scene_id, content_md, revision_note, who)
+        if status == "final":
+            _gate_final(conn, "scene", scene_id, False)
         for field, val in (("title", title), ("synopsis", synopsis), ("status", status),
                            ("sort_order", sort_order)):
             if val is not None:
@@ -640,8 +714,6 @@ def scene_update(scene_id: str, title: str | None = None, synopsis: str | None =
         if pov_entity_id is not None:
             conn.execute("UPDATE scenes SET pov_entity_id=?, updated_at=? WHERE id=?",
                          (pov_entity_id or None, _now(), scene_id))
-        if content_md is not None:
-            _write_revision(conn, "scene", scene_id, content_md, revision_note, who)
         return _row(conn.execute("SELECT * FROM scenes WHERE id=?", (scene_id,)).fetchone())
 
 
@@ -652,6 +724,7 @@ def scene_move(scene_id: str, chapter_id: str, sort_order: int | None = None) ->
     _require_author()
     with _db() as conn:
         sc = _get_target(conn, "scene", scene_id)
+        _require_unlocked(conn, "scene", scene_id, "scene_move")
         ch = _get_target(conn, "chapter", chapter_id)
         if ch["project_id"] != sc["project_id"]:
             raise ValueError("target chapter is in a different project")
@@ -668,6 +741,7 @@ def scene_delete(scene_id: str) -> dict:
     _require_author()
     with _db() as conn:
         _get_target(conn, "scene", scene_id)
+        _require_unlocked(conn, "scene", scene_id, "scene_delete")
         conn.execute("UPDATE scenes SET deleted=1, updated_at=? WHERE id=?", (_now(), scene_id))
         return {"deleted": scene_id}
 
@@ -690,6 +764,7 @@ def meta_set(target_type: str, target_id: str, key: str, value: str) -> dict:
                 raise ValueError(f"project {target_id} not found")
         else:
             _get_target(conn, target_type, target_id)
+            _require_unlocked(conn, target_type, target_id, f"meta_set:{key}")
         if value == "":
             conn.execute("DELETE FROM node_meta WHERE target_type=? AND target_id=? AND key=?",
                          (target_type, target_id, key))
@@ -750,6 +825,7 @@ def revision_restore(revision_id: str) -> dict:
         if old is None:
             raise ValueError(f"revision {revision_id} not found")
         _get_target(conn, old["target_type"], old["target_id"])
+        _require_unlocked(conn, old["target_type"], old["target_id"], "revision_restore")
         new_rev = _write_revision(conn, old["target_type"], old["target_id"], old["content_md"],
                                   f"restored from rev {old['rev']}", who)
         return {"target_type": old["target_type"], "target_id": old["target_id"],
@@ -881,6 +957,7 @@ def proposal_accept(proposal_id: str, force: bool = False, note: str = "") -> di
         if p["status"] != "pending":
             raise ValueError(f"proposal is already {p['status']}")
         target = _get_target(conn, p["target_type"], p["target_id"])
+        _require_unlocked(conn, p["target_type"], p["target_id"], "proposal_accept")
         if target["rev"] > p["base_rev"] and not force:
             raise ValueError(
                 f"stale: proposal was written against rev {p['base_rev']} but target is at "
@@ -1006,6 +1083,478 @@ def search(query: str, project_id: str | None = None, types: str = "",
         if not out and not type_filter:
             out = _search_like(conn, query, project_id, limit)
     return out
+
+
+# ---------------------------------------------------------------- deterministic gates
+
+def _profile_for(conn, target_type: str, target_id: str) -> dict | None:
+    """Resolve the voice profile for a node: its own voice_profile_id meta, else its
+    chapter's (for scenes). Returns {'id', 'banned_chars', 'patterns'} or None."""
+    pid = conn.execute(
+        "SELECT value FROM node_meta WHERE target_type=? AND target_id=? AND key='voice_profile_id'",
+        (target_type, target_id)).fetchone()
+    if pid is None and target_type == "scene":
+        sc = conn.execute("SELECT chapter_id FROM scenes WHERE id=?", (target_id,)).fetchone()
+        if sc is not None:
+            pid = conn.execute(
+                "SELECT value FROM node_meta WHERE target_type='chapter' AND target_id=? "
+                "AND key='voice_profile_id'", (sc["chapter_id"],)).fetchone()
+    if pid is None:
+        return None
+    meta = {r["key"]: r["value"] for r in conn.execute(
+        "SELECT key, value FROM node_meta WHERE target_type='entity' AND target_id=?",
+        (pid["value"],))}
+    try:
+        patterns = json.loads(meta.get("lint_banned_patterns", "[]"))
+    except ValueError:
+        patterns = []
+    return {"id": pid["value"], "banned_chars": meta.get("lint_banned", ""),
+            "patterns": patterns}
+
+
+def _lint_violations(conn, target_type: str, target_id: str) -> list[dict]:
+    """Profile-scoped mechanical style check (spec B): banned characters/patterns
+    attached to the node's voice profile. No profile or no rules = no violations."""
+    prof = _profile_for(conn, target_type, target_id)
+    if not prof or (not prof["banned_chars"] and not prof["patterns"]):
+        return []
+    row = conn.execute(f"SELECT content_md FROM {TARGET_TABLES[target_type]} WHERE id=?",
+                       (target_id,)).fetchone()
+    text = (row["content_md"] or "") if row else ""
+    out = []
+    for i, para in enumerate(text.split("\n\n"), start=1):
+        for ch in prof["banned_chars"]:
+            n = para.count(ch)
+            if n:
+                out.append({"check": "voice_lint", "paragraph": i, "char": ch, "count": n,
+                            "snippet": para.strip()[:80]})
+        for pat in prof["patterns"]:
+            try:
+                if re.search(pat, para):
+                    out.append({"check": "voice_lint", "paragraph": i, "pattern": pat,
+                                "snippet": para.strip()[:80]})
+            except re.error:
+                continue
+    return out
+
+
+def _silhouette_terms(conn, project_id: str) -> dict[str, list[str]]:
+    """entity_id -> word-bounded terms that must never appear in prose."""
+    out: dict[str, list[str]] = {}
+    for r in conn.execute(
+            "SELECT id, name FROM entities WHERE project_id=? AND visibility='silhouette' "
+            "AND deleted=0", (project_id,)):
+        terms = [r["name"]]
+        for key in ("aliases", "defined_phrases"):
+            m = conn.execute(
+                "SELECT value FROM node_meta WHERE target_type='entity' AND target_id=? AND key=?",
+                (r["id"], key)).fetchone()
+            if m is not None:
+                terms += [t.strip() for t in m["value"].split(",")]
+        out[r["id"]] = [t for t in terms if len(t.strip()) >= 3]
+    return out
+
+
+def _silhouette_leaks_for(conn, target_type: str, target_id: str) -> list[dict]:
+    row = conn.execute(
+        f"SELECT project_id, content_md FROM {TARGET_TABLES[target_type]} WHERE id=?",
+        (target_id,)).fetchone()
+    if row is None or not row["content_md"]:
+        return []
+    text = row["content_md"].lower()
+    leaks = []
+    for eid, terms in _silhouette_terms(conn, row["project_id"]).items():
+        for t in terms:
+            for m in re.finditer(rf"(?<!\w){re.escape(t.lower())}(?!\w)", text):
+                leaks.append({"check": "silhouette_leak", "entity_id": eid, "term": t,
+                              "snippet": row["content_md"][max(0, m.start() - 40):m.end() + 40]})
+    return leaks
+
+
+def _gate_final(conn, target_type: str, target_id: str, final_override: bool):
+    """Deterministic final gate (spec H.5 / F / B): voice lint + silhouette leaks +
+    linked claims verified false. Override is owner-only and logs a decision."""
+    problems = _lint_violations(conn, target_type, target_id)
+    problems += _silhouette_leaks_for(conn, target_type, target_id)
+    for l in conn.execute("SELECT from_id, to_id FROM links WHERE from_id=? OR to_id=?",
+                          (target_id, target_id)):
+        other = l["to_id"] if l["from_id"] == target_id else l["from_id"]
+        v = conn.execute("SELECT verdict FROM verifications WHERE claim_id=? "
+                         "ORDER BY created_at DESC LIMIT 1", (other,)).fetchone()
+        if v is not None and v["verdict"] == "false":
+            ent = conn.execute("SELECT name FROM entities WHERE id=?", (other,)).fetchone()
+            problems.append({"check": "fact", "claim_id": other,
+                             "detail": f"linked claim verified FALSE: {ent['name'] if ent else other}"})
+    if not problems:
+        return
+    if not final_override:
+        raise ValueError(
+            f"final gate BLOCKED ({len(problems)} problem(s)): "
+            + json.dumps(problems)[:1400]
+            + " — fix these, or an owner passes final_override=true (logs a decision).")
+    _require_owner()
+    row = conn.execute(f"SELECT project_id FROM {TARGET_TABLES[target_type]} WHERE id=?",
+                       (target_id,)).fetchone()
+    conn.execute(
+        "INSERT INTO decisions (id, project_id, subject_type, subject_id, ruling, rationale, "
+        "decided_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (_id(), row["project_id"], "gate_override", target_id,
+         f"{target_type} allowed to enter final despite gate report",
+         json.dumps(problems)[:2000], _caller()["name"], _now()))
+
+
+@mcp.tool()
+def voice_lint_run(target_type: str, target_id: str) -> list[dict]:
+    """Run the profile-scoped mechanical style check on a chapter or scene. Attach a
+    profile via meta key 'voice_profile_id' pointing at a voice_profile entity whose
+    meta 'lint_banned' lists banned characters (e.g. em dash, semicolon, colon) and
+    optional 'lint_banned_patterns' (JSON regex list). Any role."""
+    if target_type not in ("chapter", "scene"):
+        raise ValueError("target_type must be 'chapter' or 'scene'")
+    with _db() as conn:
+        _get_target(conn, target_type, target_id)
+        return _lint_violations(conn, target_type, target_id)
+
+
+@mcp.tool()
+def silhouette_leak_check(project_id: str, chapter_id: str | None = None) -> list[dict]:
+    """Scan prose for silhouette-visibility entities' names/aliases/defined phrases
+    (meta 'defined_phrases', comma-separated). A leak is blocking at the final gate.
+    Scans one chapter (+its scenes) or the whole project. Any role."""
+    leaks: list[dict] = []
+    with _db() as conn:
+        if chapter_id is not None:
+            targets = [("chapter", chapter_id)] + [
+                ("scene", r["id"]) for r in conn.execute(
+                    "SELECT id FROM scenes WHERE chapter_id=? AND deleted=0", (chapter_id,))]
+        else:
+            targets = [("chapter", r["id"]) for r in conn.execute(
+                "SELECT id FROM chapters WHERE project_id=? AND deleted=0", (project_id,))]
+            targets += [("scene", r["id"]) for r in conn.execute(
+                "SELECT id FROM scenes WHERE project_id=? AND deleted=0", (project_id,))]
+        for tt, tid in targets:
+            for leak in _silhouette_leaks_for(conn, tt, tid):
+                leaks.append({**leak, "target_type": tt, "target_id": tid})
+    return leaks
+
+
+# ---------------------------------------------------------------- parts
+
+@mcp.tool()
+def part_create(project_id: str, title: str, sort_order: int = 0) -> dict:
+    """Create a manuscript part (Part → Chapter → Scene). Author role required."""
+    _require_author()
+    with _db() as conn:
+        if conn.execute("SELECT 1 FROM projects WHERE id=? AND deleted=0",
+                        (project_id,)).fetchone() is None:
+            raise ValueError(f"project {project_id} not found")
+        pid = _id()
+        conn.execute("INSERT INTO parts (id, project_id, title, sort_order, created_by, created_at) "
+                     "VALUES (?,?,?,?,?,?)",
+                     (pid, project_id, title, sort_order, _caller()["name"], _now()))
+        return _row(conn.execute("SELECT * FROM parts WHERE id=?", (pid,)).fetchone())
+
+
+@mcp.tool()
+def part_list(project_id: str) -> list[dict]:
+    """List a project's parts in order, with chapter counts."""
+    with _db() as conn:
+        out = _rows(conn.execute(
+            "SELECT * FROM parts WHERE project_id=? AND deleted=0 ORDER BY sort_order, created_at",
+            (project_id,)))
+        for p in out:
+            p["chapter_count"] = conn.execute(
+                "SELECT COUNT(*) n FROM chapters WHERE part_id=? AND deleted=0",
+                (p["id"],)).fetchone()["n"]
+        return out
+
+
+@mcp.tool()
+def part_update(part_id: str, title: str | None = None, sort_order: int | None = None) -> dict:
+    """Rename/reorder a part. Author role required."""
+    _require_author()
+    with _db() as conn:
+        if conn.execute("SELECT 1 FROM parts WHERE id=? AND deleted=0", (part_id,)).fetchone() is None:
+            raise ValueError(f"part {part_id} not found")
+        for field, val in (("title", title), ("sort_order", sort_order)):
+            if val is not None:
+                conn.execute(f"UPDATE parts SET {field}=? WHERE id=?", (val, part_id))
+        return _row(conn.execute("SELECT * FROM parts WHERE id=?", (part_id,)).fetchone())
+
+
+# ---------------------------------------------------------------- locks & visibility
+
+@mcp.tool()
+def lock_set(target_type: str, target_id: str, kind: str = "content", reason: str = "") -> dict:
+    """Lock an entity/chapter/scene against ALL mutation (kind: content |
+    personal_truth). Blocked attempts are recorded. Owner only."""
+    _require_owner()
+    if kind not in ("content", "personal_truth"):
+        raise ValueError("kind must be 'content' or 'personal_truth'")
+    with _db() as conn:
+        _get_target(conn, target_type, target_id)
+        conn.execute("INSERT OR REPLACE INTO locks (target_type, target_id, kind, reason, "
+                     "locked_by, locked_at) VALUES (?,?,?,?,?,?)",
+                     (target_type, target_id, kind, reason, _caller()["name"], _now()))
+        _log_lock_event(conn, target_type, target_id, "locked", reason)
+        return {"locked": target_id, "kind": kind}
+
+
+@mcp.tool()
+def lock_remove(target_type: str, target_id: str) -> dict:
+    """Remove a lock. Owner only."""
+    _require_owner()
+    with _db() as conn:
+        n = conn.execute("DELETE FROM locks WHERE target_type=? AND target_id=?",
+                         (target_type, target_id)).rowcount
+        _log_lock_event(conn, target_type, target_id, "unlocked")
+        return {"unlocked": target_id, "existed": bool(n)}
+
+
+@mcp.tool()
+def lock_list(include_events: bool = False) -> dict:
+    """List all locks (and optionally the lock event log, newest first)."""
+    with _db() as conn:
+        out = {"locks": _rows(conn.execute("SELECT * FROM locks ORDER BY locked_at"))}
+        if include_events:
+            out["events"] = _rows(conn.execute(
+                "SELECT * FROM lock_events ORDER BY created_at DESC LIMIT 200"))
+        return out
+
+
+@mcp.tool()
+def visibility_set(entity_id: str, visibility: str) -> dict:
+    """Set canon visibility: public | private | silhouette. Silhouette facts drive
+    continuity but must never be named in prose (enforced at the final gate).
+    Relaxing private/silhouette back to public is owner-only. Author role required."""
+    _require_author()
+    if visibility not in VISIBILITIES:
+        raise ValueError(f"visibility must be one of {sorted(VISIBILITIES)}")
+    with _db() as conn:
+        ent = _get_target(conn, "entity", entity_id)
+        if ent["visibility"] in ("private", "silhouette") and visibility == "public":
+            _require_owner()
+        conn.execute("UPDATE entities SET visibility=?, updated_at=? WHERE id=?",
+                     (visibility, _now(), entity_id))
+        return {"entity_id": entity_id, "visibility": visibility}
+
+
+# ---------------------------------------------------------------- seam pointer
+
+@mcp.tool()
+def seam_set(project_id: str, last_verified: str, first_invented: str,
+             seam_date: str = "") -> dict:
+    """Set the reality→fiction seam: the last verified real-world event and the first
+    invented one (spec B). seam_date (ISO) enables mechanical pre/post sorting.
+    Author role required."""
+    _require_author()
+    with _db() as conn:
+        if conn.execute("SELECT 1 FROM projects WHERE id=? AND deleted=0",
+                        (project_id,)).fetchone() is None:
+            raise ValueError(f"project {project_id} not found")
+        who = _caller()["name"]
+        for k, v in (("seam_last_verified", last_verified),
+                     ("seam_first_invented", first_invented), ("seam_date", seam_date)):
+            conn.execute(
+                "INSERT INTO node_meta (target_type, target_id, key, value, updated_by, updated_at) "
+                "VALUES ('project',?,?,?,?,?) ON CONFLICT(target_type, target_id, key) "
+                "DO UPDATE SET value=excluded.value, updated_by=excluded.updated_by, "
+                "updated_at=excluded.updated_at", (project_id, k, v, who, _now()))
+        # read back on THIS conn — a fresh connection wouldn't see the open transaction
+        return {"last_verified": last_verified, "first_invented": first_invented,
+                "seam_date": seam_date}
+
+
+@mcp.tool()
+def seam_get(project_id: str) -> dict:
+    """Read the reality→fiction seam pointer."""
+    with _db() as conn:
+        m = {r["key"]: r["value"] for r in conn.execute(
+            "SELECT key, value FROM node_meta WHERE target_type='project' AND target_id=? "
+            "AND key IN ('seam_last_verified','seam_first_invented','seam_date')",
+            (project_id,))}
+        return {"last_verified": m.get("seam_last_verified", ""),
+                "first_invented": m.get("seam_first_invented", ""),
+                "seam_date": m.get("seam_date", "")}
+
+
+# ---------------------------------------------------------------- research claims & verification
+
+@mcp.tool()
+def research_claim_create(project_id: str, claim: str, domain: str,
+                          classification: str, applicable_date: str = "",
+                          asserted_by_character: str = "", source_url: str = "",
+                          notes: str = "") -> dict:
+    """Log a factual assertion as a research claim (spec H). domain: technical |
+    scientific | political | historical | geographic | medical | legal | economic |
+    cultural | other. classification: fact | inference | projection |
+    deliberate_fiction. Link it to the scenes/chapters that assert it via
+    link_create(rel_type='asserts'). Author role required."""
+    _require_author()
+    if domain not in CLAIM_DOMAINS:
+        raise ValueError(f"domain must be one of {sorted(CLAIM_DOMAINS)}")
+    if classification not in CLAIM_CLASSES:
+        raise ValueError(f"classification must be one of {sorted(CLAIM_CLASSES)}")
+    who = _caller()["name"]
+    with _db() as conn:
+        if conn.execute("SELECT 1 FROM projects WHERE id=? AND deleted=0",
+                        (project_id,)).fetchone() is None:
+            raise ValueError(f"project {project_id} not found")
+        eid = _id()
+        conn.execute(
+            "INSERT INTO entities (id, project_id, kind, name, summary, content_md, sort_order, "
+            "created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,0,?,?,?)",
+            (eid, project_id, "research", claim[:120], f"[{domain}/{classification}]",
+             claim + (f"\n\n{notes}" if notes else ""), who, _now(), _now()))
+        _record_initial_revision(conn, "entity", eid, claim, who)
+        seam_date = conn.execute(
+            "SELECT value FROM node_meta WHERE target_type='project' AND target_id=? "
+            "AND key='seam_date'", (project_id,)).fetchone()
+        seam_side = ""
+        if seam_date is not None and seam_date["value"] and applicable_date:
+            seam_side = "pre" if applicable_date <= seam_date["value"] else "post"
+        for k, v in (("claim_domain", domain), ("claim_class", classification),
+                     ("applicable_date", applicable_date),
+                     ("asserted_by_character", asserted_by_character),
+                     ("source_url", source_url), ("seam_side", seam_side)):
+            if v:
+                conn.execute(
+                    "INSERT INTO node_meta (target_type, target_id, key, value, updated_by, updated_at) "
+                    "VALUES ('entity',?,?,?,?,?)", (eid, k, v, who, _now()))
+        return _row(conn.execute("SELECT * FROM entities WHERE id=?", (eid,)).fetchone())
+
+
+@mcp.tool()
+def research_claim_verify(claim_id: str, verdict: str, sources: list[dict] | None = None,
+                          confidence: float = 0.0, notes: str = "") -> dict:
+    """File an immutable, source-cited verification of a claim. verdict: verified |
+    false | disputed | unverifiable | outdated. sources: [{url, title, publisher,
+    access_date, quote, source_type(primary|secondary|commentary)}] — required for
+    verified/false verdicts. Any role (evidence-gathering, not editorial judgment)."""
+    if verdict not in VERDICTS:
+        raise ValueError(f"verdict must be one of {sorted(VERDICTS)}")
+    sources = sources or []
+    if verdict in ("verified", "false") and not sources:
+        raise ValueError(f"a '{verdict}' verdict requires at least one cited source")
+    who = _caller()["name"]
+    with _db() as conn:
+        claim = _get_target(conn, "entity", claim_id)
+        vid = _id()
+        conn.execute(
+            "INSERT INTO verifications (id, claim_id, claim_rev, verdict, confidence, "
+            "sources_json, notes, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (vid, claim_id, claim["rev"], verdict, confidence, json.dumps(sources),
+             notes, who, _now()))
+        conn.execute(
+            "INSERT INTO node_meta (target_type, target_id, key, value, updated_by, updated_at) "
+            "VALUES ('entity',?,?,?,?,?) ON CONFLICT(target_type, target_id, key) "
+            "DO UPDATE SET value=excluded.value, updated_by=excluded.updated_by, "
+            "updated_at=excluded.updated_at",
+            (claim_id, "verification_status", verdict, who, _now()))
+        return _row(conn.execute("SELECT * FROM verifications WHERE id=?", (vid,)).fetchone())
+
+
+@mcp.tool()
+def research_claim_verifications(claim_id: str) -> list[dict]:
+    """Verification history for a claim, newest first, sources parsed."""
+    with _db() as conn:
+        _get_target(conn, "entity", claim_id)
+        out = _rows(conn.execute(
+            "SELECT * FROM verifications WHERE claim_id=? ORDER BY created_at DESC",
+            (claim_id,)))
+        for v in out:
+            try:
+                v["sources"] = json.loads(v.pop("sources_json"))
+            except ValueError:
+                v["sources"] = []
+        return out
+
+
+# ---------------------------------------------------------------- fictionalization, decisions, rebuttals
+
+@mcp.tool()
+def fictionalization_log_create(project_id: str, real_fact: str, invented_fact: str,
+                                rationale: str = "", target_type: str = "",
+                                target_id: str = "") -> dict:
+    """Record a deliberate fictionalization: the real fact and the invention that
+    replaces it in prose, so inventions never harden into remembered biography
+    (spec 3.12). Author role required."""
+    _require_author()
+    with _db() as conn:
+        fid = _id()
+        conn.execute(
+            "INSERT INTO fictionalizations (id, project_id, real_fact, invented_fact, rationale, "
+            "target_type, target_id, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (fid, project_id, real_fact, invented_fact, rationale, target_type, target_id,
+             _caller()["name"], _now()))
+        return _row(conn.execute("SELECT * FROM fictionalizations WHERE id=?", (fid,)).fetchone())
+
+
+@mcp.tool()
+def fictionalization_log_list(project_id: str) -> list[dict]:
+    """List a project's fictionalization records."""
+    with _db() as conn:
+        return _rows(conn.execute(
+            "SELECT * FROM fictionalizations WHERE project_id=? ORDER BY created_at",
+            (project_id,)))
+
+
+@mcp.tool()
+def decision_create(project_id: str, subject_type: str, ruling: str,
+                    subject_id: str = "", rationale: str = "") -> dict:
+    """Record an explicit owner decision (spec 3.13): the ruling of record on a
+    finding, proposal, claim, gate, or canon question. Immutable. Owner only."""
+    _require_owner()
+    with _db() as conn:
+        did = _id()
+        conn.execute(
+            "INSERT INTO decisions (id, project_id, subject_type, subject_id, ruling, rationale, "
+            "decided_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (did, project_id, subject_type, subject_id, ruling, rationale,
+             _caller()["name"], _now()))
+        return _row(conn.execute("SELECT * FROM decisions WHERE id=?", (did,)).fetchone())
+
+
+@mcp.tool()
+def decision_list(project_id: str, subject_id: str | None = None) -> list[dict]:
+    """List decisions for a project (optionally scoped to one subject), newest first."""
+    with _db() as conn:
+        q = "SELECT * FROM decisions WHERE project_id=?"
+        args: list = [project_id]
+        if subject_id is not None:
+            q += " AND subject_id=?"
+            args.append(subject_id)
+        return _rows(conn.execute(q + " ORDER BY created_at DESC", args))
+
+
+@mcp.tool()
+def rebuttal_create(target_kind: str, target_id: str, body: str,
+                    evidence_quote: str = "", location: str = "") -> dict:
+    """File structured dissent against a proposal (or, later, a finding) — same
+    evidence ethic as findings (spec 3.13). The dissent trail survives the decision
+    either way. Any role."""
+    if target_kind not in ("proposal", "finding"):
+        raise ValueError("target_kind must be 'proposal' or 'finding'")
+    with _db() as conn:
+        if target_kind == "proposal" and conn.execute(
+                "SELECT 1 FROM proposals WHERE id=?", (target_id,)).fetchone() is None:
+            raise ValueError(f"proposal {target_id} not found")
+        rid = _id()
+        conn.execute(
+            "INSERT INTO rebuttals (id, target_kind, target_id, body, evidence_quote, location, "
+            "created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (rid, target_kind, target_id, body, evidence_quote, location,
+             _caller()["name"], _now()))
+        return _row(conn.execute("SELECT * FROM rebuttals WHERE id=?", (rid,)).fetchone())
+
+
+@mcp.tool()
+def rebuttal_list(target_kind: str, target_id: str) -> list[dict]:
+    """List rebuttals filed against a proposal or finding, oldest first."""
+    with _db() as conn:
+        return _rows(conn.execute(
+            "SELECT * FROM rebuttals WHERE target_kind=? AND target_id=? ORDER BY created_at",
+            (target_kind, target_id)))
 
 
 # ---------------------------------------------------------------- appearances & timeline
